@@ -169,13 +169,13 @@ function metersPerPixel(lngLat: LngLat): number {
 
 /** Тип объектов важен только при выборе. Инструменты вставки сами решают, куда их можно поставить. */
 function pickType(): 'auto' | 'links' | 'nodes' {
-  if (editor.tool === 'select') return editor.activeType
+  if (editor.tool === 'select' || editor.tool === 'delete') return editor.activeType
   return ['object', 'stopPoint', 'lineWay', 'bridge', 'tunnel'].includes(editor.tool) ? 'links' : 'auto'
 }
 
 /** Объекты вне дорог не входят в кэш дорог, поэтому ищем их отдельно. */
 function pickFreeObject(p: XY, mpp: number): HitNode | null {
-  if (editor.tool !== 'select' && editor.tool !== 'stopGroup') return null
+  if (editor.tool !== 'select' && editor.tool !== 'delete' && editor.tool !== 'stopGroup') return null
   const doc = editor.doc!
   let best: HitNode | null = null
   let distance = NODE_PICK_PX * mpp
@@ -938,6 +938,7 @@ function onClick(event: MapMouseEvent): void {
   const hit = pick(event.lngLat)
 
   switch (editor.tool) {
+    case 'delete':
     case 'select': {
       if (hit?.kind === 'mid') return
       const isSim = editor.viewMode === 'sim'
@@ -1057,6 +1058,17 @@ function addDrawPoint(event: MapMouseEvent): void {
 }
 
 function onDoubleClick(event: MapMouseEvent): void {
+  if (editor.tool === 'delete') {
+    event.preventDefault()
+    const hit = pick(event.lngLat)
+    const doc = editor.doc!
+    if (hit?.kind === 'node' && editor.acceptsNode(hit.id)) {
+      editor.requestDelete([{ kind: 'node', id: hit.id }], doc.node(hit.id).tags?.name ?? `Узел ${hit.id}`)
+    } else if (hit?.kind === 'way' && editor.acceptsWay(hit.id)) {
+      editor.requestDelete([{ kind: 'way', id: hit.id }], doc.way(hit.id).tags?.name ?? `Отрезок ${hit.id}`)
+    }
+    return
+  }
   if (editor.tool === 'road') {
     event.preventDefault()
     editor.finishRoad()

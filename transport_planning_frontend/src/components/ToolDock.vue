@@ -16,6 +16,7 @@ const tools: { id: Tool; label: string; key: string; icon: typeof Circle; hint: 
   { id: 'signal', label: 'Светофор', key: 'T', icon: TrafficCone, hint: 'Щелчок по узлу или дороге ставит или снимает светофор' },
   { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Щёлкните начало перехода, затем его конец: линия должна пересечь дорогу. Щелчок по существующему переходу снимает его' },
   { id: 'bridge', label: 'Мост', key: 'B', icon: Landmark, hint: 'Щелчок по дороге отмечает её как мост' },
+  { id: 'delete', label: 'Удаление', key: 'R', icon: Trash2, hint: 'Двойной щелчок по объекту активного типа спросит, удалить ли его' },
   { id: 'tunnel', label: 'Тоннель', key: 'G', icon: TrainFrontTunnel, hint: 'Щелчок по дороге отмечает её как тоннель' },
 ]
 
@@ -38,12 +39,6 @@ const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint 
         <component :is="tool.icon" :size="17" aria-hidden="true" />
         <span>{{ tool.label }}</span>
         <kbd>{{ tool.key }}</kbd>
-      </button>
-      <span class="sep" aria-hidden="true" />
-      <button class="tool danger" :disabled="editor.selection.length === 0" title="Удалить выбранное (Delete)" @click="editor.deleteSelection">
-        <Trash2 :size="17" aria-hidden="true" />
-        <span>Удалить</span>
-        <kbd>Del</kbd>
       </button>
     </nav>
   </div>
@@ -93,18 +88,6 @@ const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint 
   border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: 11px;
-}
-.sep {
-  flex: none;
-  width: 1px;
-  margin: 4px 3px;
-  background: var(--line-strong);
-}
-.tool:disabled {
-  opacity: 0.4;
-}
-.tool.danger:hover:not(:disabled) {
-  color: var(--err-text);
 }
 .tool:hover {
   background: var(--raised);

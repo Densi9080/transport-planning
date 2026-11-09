@@ -79,6 +79,7 @@ export type Tool =
   | 'stopArea'
   | 'stopGroup'
   | 'pan'
+  | 'delete'
 
 /** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
 export type ActiveType = 'auto' | 'links' | 'nodes'
@@ -218,6 +219,7 @@ export const useEditor = defineStore('editor', () => {
   const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
   const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
   const consoleOpen = ref(true)
+  const deleteRequest = shallowRef<{ items: SelectedItem[]; label: string } | null>(null)
   const pendingRoad = shallowRef<{ points: DrawPoint[] } | null>(null)
   const crossingStart = shallowRef<LatLon | null>(null)
   const selectedTurn = shallowRef<{ node: number; from: number; to: number } | null>(null)
@@ -826,6 +828,35 @@ export const useEditor = defineStore('editor', () => {
     }
   }
 
+  function requestDelete(items: SelectedItem[], label: string): void {
+    if (items.length > 0) deleteRequest.value = { items, label }
+  }
+
+  /** Delete тоже спрашивает подтверждение: случайное нажатие не должно стирать объект. */
+  function requestDeleteSelection(): void {
+    const items = selection.value
+    if (items.length === 0) return
+    const [first] = items
+    if (items.length > 1 || !first) {
+      requestDelete(items, `Выбрано объектов: ${items.length}`)
+      return
+    }
+    const tags = first.kind === 'node' ? doc.value?.nodes.get(first.id)?.tags : doc.value?.ways.get(first.id)?.tags
+    requestDelete(items, tags?.name ?? `${first.kind === 'node' ? 'Узел' : 'Отрезок'} ${first.id}`)
+  }
+
+  function confirmDelete(): void {
+    const request = deleteRequest.value
+    deleteRequest.value = null
+    if (!request) return
+    selection.value = request.items
+    deleteSelection()
+  }
+
+  function cancelDelete(): void {
+    deleteRequest.value = null
+  }
+
   function chooseObject(next: NetObject): void {
     selectedTurn.value = null
     activeObject.value = next
@@ -1376,6 +1407,11 @@ export const useEditor = defineStore('editor', () => {
     objectHidden,
     objectLocked,
     consoleOpen,
+    deleteRequest,
+    requestDelete,
+    requestDeleteSelection,
+    confirmDelete,
+    cancelDelete,
     pendingRoad,
     cancelRoadDialog,
     confirmRoad,

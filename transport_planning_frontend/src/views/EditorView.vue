@@ -6,6 +6,7 @@ import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
 import ConsoleDock from '@/components/ConsoleDock.vue'
 import CrsDialog from '@/components/CrsDialog.vue'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import SaveGuardDialog from '@/components/SaveGuardDialog.vue'
@@ -45,6 +46,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   p: 'sign',
   q: 'connector',
   k: 'pan',
+  r: 'delete',
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -73,7 +75,7 @@ function changeLanes(delta: number): void {
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
   // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
-  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen || editor.pendingRoad) return
+  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen || editor.pendingRoad || editor.deleteRequest) return
   const key = event.key.toLowerCase()
   const code = event.code
 
@@ -143,7 +145,7 @@ function onKeyDown(event: KeyboardEvent): void {
   }
   if (key === 'delete' || key === 'backspace') {
     event.preventDefault()
-    editor.deleteSelection()
+    editor.requestDeleteSelection()
     return
   }
   if (key === '?' || code === 'F1') {
@@ -269,6 +271,7 @@ watch(
       <HelpDialog v-if="editor.helpOpen" />
       <SaveGuardDialog v-if="editor.leaveRequest" />
       <CrsDialog v-if="editor.crsDialogOpen" />
+      <DeleteConfirmDialog v-if="editor.deleteRequest" />
       <NewLinkDialog v-if="editor.pendingRoad" />
       <JunctionEditor v-if="editor.junctionNode !== null" :key="editor.junctionNode" />
       <AssistantSettingsDialog v-if="assistant.settingsOpen" />
