@@ -1,6 +1,6 @@
 import type { OsmDoc } from '@/core/doc'
 import { heightAlong, linkHeights } from '@/core/elevation'
-import { dist, leftNormal, offsetPolyline, polylineLength, Projector, sub, trimPolyline, unit } from '@/core/geo'
+import { dist, leftNormal, offsetPolyline, polylineLength, Projector, quadraticCurve, sub, trimPolyline, unit } from '@/core/geo'
 import { laneOffsets } from '@/core/lanes'
 import {
   armsByLink,
@@ -8,6 +8,18 @@ import {
   type Connector,
   junctionConnectors,
 } from '@/core/scene'
+import {
+  colorAt,
+  cycleLength,
+  DEFAULT_ALL_RED_S,
+  DEFAULT_YELLOW_S,
+  movementKey,
+  parseSignalPlan,
+  type PhaseWindow,
+  phaseWindows,
+  type SignalColor,
+  type SignalPlan,
+} from '@/core/signals'
 import { type Arm, buildNetwork, type Link, type Network, type TurnKind } from '@/core/topology'
 import { signApplies } from '@/core/traffic'
 import type { Tags, XY } from '@/core/types'
@@ -20,6 +32,8 @@ export class Track {
   readonly cum: number[]
   readonly length: number
   readonly heights: number[]
+  /** Кривые, перед которыми нужно сбросить скорость: положение и допустимая скорость. */
+  readonly curves: { s: number; speed: number }[] = []
   /** Машины по возрастанию положения: последняя в списке едет первой. */
   cars: Car[] = []
 
@@ -31,6 +45,21 @@ export class Track {
       this.cum.push(this.cum[i - 1]! + dist(this.points[i - 1]!, this.points[i]!))
     }
     this.length = Math.max(this.cum.at(-1) ?? 0, MIN_TRACK_M)
+    for (let i = 1; i < this.points.length - 1; i++) {
+      const before = sub(this.points[i]!, this.points[i - 1]!)
+      const after = sub(this.points[i + 1]!, this.points[i]!)
+      const lengths = Math.hypot(before.x, before.y) + Math.hypot(after.x, after.y)
+      const angle = Math.abs(Math.atan2(before.x * after.y - before.y * after.x, before.x * after.x + before.y * after.y))
+      if (angle < MIN_CURVE_ANGLE || lengths < 1e-3) continue
+      const radius = lengths / 2 / angle
+      const speed = Math.sqrt(LATERAL_ACCEL * radius)
+      if (speed < MAX_CURVE_SPEED) this.curves.push({ s: this.cum[i]!, speed })
+    }
+  }
+
+  /** Самая низкая допустимая скорость на всём пути. */
+  get slowestCurve(): number {
+    return this.curves.reduce((low, curve) => Math.min(low, curve.speed), Number.POSITIVE_INFINITY)
   }
 
   /** Записывает положение и направление на расстоянии s. Работает на каждой машине в каждом кадре. */
@@ -74,6 +103,40 @@ export interface TrackPoint {
 }
 
 const MIN_TRACK_M = 0.5
+const LATERAL_ACCEL = 2.4
+const MIN_CURVE_ANGLE = 0.02
+const MAX_CURVE_SPEED = 22
+const CORNER_MAX_CUT_M = 9
+const CORNER_MIN_ANGLE = 0.05
+const CORNER_STEP_ANGLE = 0.14
+
+/** Дороги в OSM — ломаные. По излому машина ехать не может, поэтому траектория скругляется. */
+function roundCorners(points: XY[]): XY[] {
+  if (points.length < 3) return points
+  const result: XY[] = [points[0]!]
+  for (let i = 1; i < points.length - 1; i++) {
+    const a = points[i - 1]!
+    const b = points[i]!
+    const c = points[i + 1]!
+    const toA = sub(a, b)
+    const toC = sub(c, b)
+    const lenA = Math.hypot(toA.x, toA.y)
+    const lenC = Math.hypot(toC.x, toC.y)
+    if (lenA < 1e-3 || lenC < 1e-3) continue
+    const angle = Math.PI - Math.abs(Math.atan2(toA.x * toC.y - toA.y * toC.x, toA.x * toC.x + toA.y * toC.y))
+    if (angle < CORNER_MIN_ANGLE) {
+      result.push(b)
+      continue
+    }
+    const cut = Math.min(CORNER_MAX_CUT_M, lenA * 0.45, lenC * 0.45)
+    const start = { x: b.x + (toA.x / lenA) * cut, y: b.y + (toA.y / lenA) * cut }
+    const end = { x: b.x + (toC.x / lenC) * cut, y: b.y + (toC.y / lenC) * cut }
+    const steps = Math.max(3, Math.ceil(angle / CORNER_STEP_ANGLE))
+    result.push(...quadraticCurve(start, b, end, steps))
+  }
+  result.push(points.at(-1)!)
+  return result
+}
 
 export class SimLane extends Track {
   connectors: SimConnector[] = []
@@ -104,8 +167,10 @@ export class SimConnector extends Track {
   /** Машины, которым уже разрешён въезд. */
   reserved = new Set<Car>()
   signal: SignalGroup | null = null
-  phase = 0
+  /** Номера фаз плана, в которых у манёвра зелёный. */
+  phases: number[] = []
   readonly speedLimit: number
+  readonly movement: string
 
   constructor(
     readonly node: number,
@@ -113,11 +178,14 @@ export class SimConnector extends Track {
     readonly toLane: SimLane,
     readonly kind: TurnKind,
     readonly continuation: boolean,
+    readonly fromNeighbor: number,
+    readonly toNeighbor: number,
     points: XY[],
     heights: number[],
   ) {
     super(points, heights)
-    this.speedLimit = continuation ? Number.POSITIVE_INFINITY : TURN_SPEED_MPS[kind]
+    this.movement = movementKey(node, fromNeighbor, toNeighbor)
+    this.speedLimit = Math.min(continuation ? Number.POSITIVE_INFINITY : TURN_SPEED_MPS[kind], this.slowestCurve)
   }
 }
 
@@ -167,13 +235,21 @@ export class SimEdge {
 }
 
 export interface SignalGroup {
+  /** Узел, в теге которого хранится план. */
+  owner: number
   nodes: number[]
-  /** Длительность зелёного по фазам в секундах. */
-  greens: number[]
+  plan: SignalPlan
+  /** План задан вручную, а не построен автоматически. */
+  custom: boolean
+  windows: PhaseWindow[]
   cycle: number
-  offset: number
   /** Точки стоп-линий для отображения. */
   stops: { connector: SimConnector; x: number; y: number }[]
+  connectors: SimConnector[]
+  /** Манёвры, которых нет в заданном плане. */
+  unassigned: number
+  /** Сдвиг автоматического плана: чтобы соседние перекрёстки не переключались одновременно. */
+  autoOffset: number
 }
 
 export interface SimNet {
@@ -206,8 +282,8 @@ export function classRank(tags: Tags): number {
 const SIGNAL_CLUSTER_M = 45
 const GREEN_MAIN_S = 32
 const GREEN_SECOND_S = 22
-export const YELLOW_S = 3
-export const ALL_RED_S = 2
+const GREEN_THROUGH_S = 40
+const GREEN_PEDESTRIAN_S = 15
 const GUESS_MIN_ARMS = 3
 const GUESS_MIN_RANK = 5
 
@@ -248,7 +324,7 @@ function buildEdges(doc: OsmDoc, network: Network, net: SimNet): Map<Arm, { in?:
       const endTangent = endGeometry?.mitreTangent ?? null
       const list = forward ? offsets.forward : offsets.backward
       list.forEach((offset, index) => {
-        let points = offsetPolyline(trimmed, offset, startTangent, endTangent)
+        let points = roundCorners(offsetPolyline(trimmed, offset, startTangent, endTangent))
         if (!forward) points = [...points].reverse()
         const laneLength = Math.max(polylineLength(points), 1e-3)
         let walked = 0
@@ -293,7 +369,17 @@ function buildConnectors(doc: OsmDoc, network: Network, net: SimNet, byArm: Map<
       const zFrom = fromLane.heights.at(-1) ?? 0
       const zTo = toLane.heights[0] ?? 0
       const heights = spec.points.map((_, i) => zFrom + ((zTo - zFrom) * i) / Math.max(1, spec.points.length - 1))
-      const connector = new SimConnector(node, fromLane, toLane, spec.kind, continuation, spec.points, heights)
+      const connector = new SimConnector(
+        node,
+        fromLane,
+        toLane,
+        spec.kind,
+        continuation,
+        spec.from.neighbor,
+        spec.to.neighbor,
+        spec.points,
+        heights,
+      )
       fromLane.connectors.push(connector)
       toLane.feeders.push(connector)
       fromEdge.moves.set(toEdge, spec.kind)
@@ -386,6 +472,38 @@ function signalNodes(doc: OsmDoc, network: Network, guess: boolean): number[] {
   return nodes
 }
 
+function approachHeading(connector: SimConnector): number {
+  const lane = connector.fromLane
+  const direction = unit(sub(lane.points.at(-1)!, lane.points.at(-2) ?? lane.points[0]!))
+  return Math.atan2(direction.x, direction.y)
+}
+
+/** Фаза манёвра по оси движения: встречные потоки идут вместе, поперечные ждут. */
+function axisPhase(connector: SimConnector, axis: number): number {
+  const difference = Math.abs(((approachHeading(connector) - axis + Math.PI * 2.5) % Math.PI) - Math.PI / 2)
+  return difference < Math.PI / 4 ? 0 : 1
+}
+
+/** План по умолчанию: две фазы. Если подходы все по одной оси, вторая фаза отдана пешеходам. */
+export function autoPlan(connectors: SimConnector[]): SignalPlan {
+  const axis = dominantAxis(connectors)
+  const phases: string[][] = [[], []]
+  for (const connector of connectors) {
+    const list = phases[axisPhase(connector, axis)]!
+    if (!list.includes(connector.movement)) list.push(connector.movement)
+  }
+  const pedestrianOnly = phases[1]!.length === 0
+  return {
+    offset: 0,
+    yellow: DEFAULT_YELLOW_S,
+    allRed: DEFAULT_ALL_RED_S,
+    phases: [
+      { green: pedestrianOnly ? GREEN_THROUGH_S : GREEN_MAIN_S, movements: phases[0]! },
+      { green: pedestrianOnly ? GREEN_PEDESTRIAN_S : GREEN_SECOND_S, movements: phases[1]! },
+    ],
+  }
+}
+
 /** Светофоры рядом работают как один объект: иначе соседние стоп-линии спорили бы друг с другом. */
 function buildSignals(doc: OsmDoc, net: SimNet, guess: boolean): void {
   const projector = net.projector
@@ -405,44 +523,83 @@ function buildSignals(doc: OsmDoc, net: SimNet, guess: boolean): void {
         }
       }
     }
+    members.sort((a, b) => a - b)
     const memberSet = new Set(members)
     const controlled = net.connectors.filter((connector) => memberSet.has(connector.node))
     if (controlled.length === 0) return
 
-    const headings = controlled.map((connector) => {
-      const lane = connector.fromLane
-      const direction = unit(sub(lane.points.at(-1)!, lane.points.at(-2) ?? lane.points[0]!))
-      return Math.atan2(direction.x, direction.y)
-    })
-    const axis = dominantAxis(controlled, headings)
+    const owner = planOwner(doc, members)
+    const plan = autoPlan(controlled)
     const group: SignalGroup = {
+      owner,
       nodes: members,
-      greens: [GREEN_MAIN_S, GREEN_SECOND_S],
-      cycle: GREEN_MAIN_S + GREEN_SECOND_S + 2 * (YELLOW_S + ALL_RED_S),
-      offset: (groupIndex * 17) % 60,
+      plan,
+      custom: false,
+      windows: [],
+      cycle: 0,
       stops: [],
+      connectors: controlled,
+      unassigned: 0,
+      autoOffset: (groupIndex * 17) % 60,
     }
+    const stored = parseSignalPlan(doc.node(owner).tags)
+    assignPlan(group, stored ?? { ...plan, offset: group.autoOffset }, stored !== null)
+
     const stopLanes = new Set<SimLane>()
-    controlled.forEach((connector, index) => {
+    for (const connector of controlled) {
       connector.signal = group
-      const difference = Math.abs(((headings[index]! - axis + Math.PI * 2.5) % Math.PI) - Math.PI / 2)
-      connector.phase = difference < Math.PI / 4 ? 1 : 0
       if (!stopLanes.has(connector.fromLane)) {
         stopLanes.add(connector.fromLane)
         const end = connector.fromLane.points.at(-1)!
         group.stops.push({ connector, x: end.x, y: end.y })
       }
-    })
+    }
     net.signals.push(group)
   })
 }
 
-function dominantAxis(connectors: SimConnector[], headings: number[]): number {
+/** План лежит на узле с настоящим светофором: узлы рядом могут быть лишь предположением модели. */
+function planOwner(doc: OsmDoc, members: number[]): number {
+  return (
+    members.find((id) => parseSignalPlan(doc.node(id).tags)) ??
+    members.find((id) => doc.node(id).tags?.highway === 'traffic_signals') ??
+    members[0]!
+  )
+}
+
+function assignPlan(group: SignalGroup, plan: SignalPlan, custom: boolean): void {
+  group.plan = plan
+  group.custom = custom
+  group.windows = phaseWindows(plan)
+  group.cycle = cycleLength(plan)
+  const axis = dominantAxis(group.connectors)
+  const unassigned = new Set<string>()
+  for (const connector of group.connectors) {
+    connector.phases = plan.phases.flatMap((phase, index) => (phase.movements.includes(connector.movement) ? [index] : []))
+    if (connector.phases.length === 0) {
+      // Новый манёвр, которого нет в плане: без зелёного он заблокировал бы подход навсегда
+      unassigned.add(connector.movement)
+      connector.phases = [Math.min(axisPhase(connector, axis), plan.phases.length - 1)]
+    }
+  }
+  group.unassigned = unassigned.size
+}
+
+/** Перечитывает планы из тегов, не трогая остальную сеть: машины на дорогах остаются на своих местах. */
+export function refreshSignalPlans(doc: OsmDoc, net: SimNet): void {
+  for (const group of net.signals) {
+    group.owner = planOwner(doc, group.nodes)
+    const stored = parseSignalPlan(doc.node(group.owner).tags)
+    assignPlan(group, stored ?? { ...autoPlan(group.connectors), offset: group.autoOffset }, stored !== null)
+  }
+}
+
+function dominantAxis(connectors: SimConnector[]): number {
   const weights = new Map<number, number>()
-  connectors.forEach((connector, index) => {
-    const bucket = Math.round(((headings[index]! + Math.PI) % Math.PI) / (Math.PI / 12))
+  for (const connector of connectors) {
+    const bucket = Math.round(((approachHeading(connector) + Math.PI) % Math.PI) / (Math.PI / 12))
     weights.set(bucket, (weights.get(bucket) ?? 0) + classRank(connector.fromLane.edge.tags))
-  })
+  }
   let best = 0
   let weight = -1
   for (const [bucket, value] of weights) {
@@ -479,14 +636,30 @@ export function buildSimNet(doc: OsmDoc, projector: Projector, guessSignals: boo
   return net
 }
 
-/** Состояние сигнала для фазы в момент времени. */
-export function signalState(group: SignalGroup, phase: number, time: number): 'green' | 'yellow' | 'red' {
-  const t = (time + group.offset) % group.cycle
-  const main = group.greens[0]!
-  const second = group.greens[1]!
-  const phaseStart = phase === 0 ? 0 : main + YELLOW_S + ALL_RED_S
-  const green = phase === 0 ? main : second
-  const local = t - phaseStart
-  if (local < 0 || local >= green + YELLOW_S) return 'red'
-  return local < green ? 'green' : 'yellow'
+/** Сигнал манёвра в момент времени. */
+export function signalState(connector: SimConnector, time: number): SignalColor {
+  const group = connector.signal
+  if (!group) return 'green'
+  const cycleTime = (time + group.plan.offset) % group.cycle
+  return colorAt(group.plan, group.windows, connector.phases, cycleTime)
+}
+
+/** Момент цикла светофора во время модели. */
+export function signalCycleTime(group: SignalGroup, time: number): number {
+  return (time + group.plan.offset) % group.cycle
+}
+
+/** Сколько секунд назад манёвру включился красный: только что сменившийся сигнал ещё пробуют проскочить. */
+export function secondsSinceRed(connector: SimConnector, time: number): number {
+  const group = connector.signal
+  if (!group) return Number.POSITIVE_INFINITY
+  for (let back = 0; back < group.cycle; back++) {
+    if (signalState(connector, time - back) !== 'red') return back
+  }
+  return group.cycle
+}
+
+/** Светофорный объект, в который входит узел. Для редактора фаз. */
+export function signalGroupAt(net: SimNet, node: number): SignalGroup | null {
+  return net.signals.find((group) => group.nodes.includes(node)) ?? null
 }

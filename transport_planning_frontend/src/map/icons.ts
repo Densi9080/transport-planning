@@ -190,8 +190,8 @@ export function registerIcons(map: MlMap): void {
 }
 
 /** Подписи рисуются картинками: так кириллица работает без внешнего сервера шрифтов. */
-export function ensureLabelImage(map: MlMap, name: string): string {
-  const id = `label:${name}`
+export function ensureLabelImage(map: MlMap, name: string, theme: 'light' | 'dark' = 'dark'): string {
+  const id = `label:${theme}:${name}`
   if (map.hasImage(id)) return id
   const measure = document.createElement('canvas').getContext('2d')!
   const font = '500 26px "Segoe UI", system-ui, sans-serif'
@@ -202,9 +202,9 @@ export function ensureLabelImage(map: MlMap, name: string): string {
       ctx.font = font
       ctx.textBaseline = 'middle'
       ctx.lineWidth = 5
-      ctx.strokeStyle = 'rgba(16,17,20,0.9)'
+      ctx.strokeStyle = theme === 'light' ? 'rgba(255,255,255,0.95)' : 'rgba(16,17,20,0.9)'
       ctx.strokeText(name, 8, 20)
-      ctx.fillStyle = 'rgba(214,218,226,0.95)'
+      ctx.fillStyle = theme === 'light' ? 'rgba(28,33,39,0.95)' : 'rgba(214,218,226,0.95)'
       ctx.fillText(name, 8, 20)
     },
     width,

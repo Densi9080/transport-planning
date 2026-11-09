@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { Box, Gauge, Pause, Play, RotateCcw, TrafficCone, TriangleAlert } from 'lucide-vue-next'
+import { Box, Check, Gauge, Pause, Play, RotateCcw, TrafficCone, TriangleAlert } from 'lucide-vue-next'
 import { computed } from 'vue'
 
-import { LOS_LABELS, LOS_TITLES, type Period } from '@/sim/macro'
-import { losFromSpeedRatio } from '@/sim/micro'
 import { LOS_COLORS } from '@/map/style'
+import { LOS_LABELS, LOS_TITLES, type Period } from '@/sim/macro'
+import { DRIVER_STYLES, STYLE_LABELS, VIOLATION_LABELS, type ViolationKind } from '@/sim/micro'
+import { signalGroupAt } from '@/sim/net'
 import { useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
+
+import SignalSummary from './SignalSummary.vue'
 
 const editor = useEditor()
 const sim = useSimulation()
@@ -19,10 +22,6 @@ const periods: { id: Period; label: string }[] = [
 const speeds = [1, 2, 5, 10]
 
 const totals = computed(() => sim.macro?.totals ?? null)
-const zoneCounts = computed(() => {
-  const zones = sim.macro?.zones ?? []
-  return { gateways: zones.filter((zone) => zone.kind === 'gateway').length, internal: zones.filter((zone) => zone.kind === 'internal').length }
-})
 
 const worstLoads = computed(() => {
   const loads = sim.macro?.loads
@@ -43,6 +42,10 @@ const losRows = computed(() =>
 )
 
 const selectedWay = computed(() => editor.selectedWays[0] ?? null)
+const selectedSignalNode = computed(() => {
+  const node = editor.selectedNodes[0]
+  return node && sim.net && signalGroupAt(sim.net, node.id) ? node.id : null
+})
 const selectedLoads = computed(() => (selectedWay.value ? sim.loadsOfWay(selectedWay.value.id) : []))
 
 /** Участки одной дороги собираем по направлениям: нагружен обычно самый узкий кусок. */
@@ -59,23 +62,24 @@ const selectedDirections = computed(() => {
   }))
 })
 
-const selectedMicro = computed(() => {
+const selectedMicroCars = computed(() => {
   void sim.loadRev
   const way = selectedWay.value
-  if (!way) return []
-  return sim.edgesOfWay(way.id).map((edge) => ({
-    edge,
-    los: losFromSpeedRatio(edge.speedRatio),
-    speed: edge.speedRatio,
-  }))
+  return way ? sim.edgesOfWay(way.id).reduce((sum, edge) => sum + edge.carCount, 0) : 0
 })
+
+const violations = computed(() =>
+  (Object.keys(VIOLATION_LABELS) as ViolationKind[]).map((kind) => ({
+    kind,
+    label: VIOLATION_LABELS[kind],
+    count: sim.stats?.violations[kind] ?? 0,
+  })),
+)
+
+const normalShare = computed(() => Math.max(0, 1 - sim.mix.aggressive - sim.mix.calm))
 
 function edgeName(load: { edge: { tags: Record<string, string>; wayId: number } }): string {
   return load.edge.tags.name ?? `Дорога ${load.edge.wayId}`
-}
-
-function focusEdge(wayId: number): void {
-  editor.focusWay(wayId)
 }
 
 function formatTime(seconds: number): string {
@@ -87,123 +91,170 @@ function formatTime(seconds: number): string {
 function setDemand(event: Event): void {
   sim.demand = Number((event.target as HTMLInputElement).value)
 }
+
+/** Сумма долей не должна превышать 100%: вторая доля уступает той, которую двигают сейчас. */
+function setMix(key: 'aggressive' | 'calm', event: Event): void {
+  const value = Number((event.target as HTMLInputElement).value)
+  const other = key === 'aggressive' ? 'calm' : 'aggressive'
+  sim.mix[key] = value
+  if (value + sim.mix[other] > 1) sim.mix[other] = Math.max(0, 1 - value)
+}
 </script>
 
 <template>
+  <div class="dock-title">Расчёт транспортной модели</div>
+
   <div class="section">
-    <h2>Транспортная модель</h2>
-    <div class="segmented accent" role="group" aria-label="Уровень модели">
+    <div class="segmented" role="group" aria-label="Уровень модели">
       <button :class="{ active: sim.level === 'macro' }" :aria-pressed="sim.level === 'macro'" @click="sim.setLevel('macro')">
-        <Gauge :size="14" aria-hidden="true" /> Макро
+        <Gauge :size="13" aria-hidden="true" /> Макро
       </button>
       <button :class="{ active: sim.level === 'micro' }" :aria-pressed="sim.level === 'micro'" @click="sim.setLevel('micro')">
-        <TrafficCone :size="14" aria-hidden="true" /> Микро
+        <TrafficCone :size="13" aria-hidden="true" /> Микро
       </button>
     </div>
-    <p class="muted hint">
-      <template v-if="sim.level === 'macro'">
-        Загрузка всей сети за час. Рассчитана из атрибутов дорог и зданий, без отдельных машин.
-      </template>
-      <template v-else>Каждая машина едет по полосе, уступает и стоит на светофорах.</template>
+    <p class="hint muted">
+      <template v-if="sim.level === 'macro'">Загрузка всей сети за час, рассчитанная из атрибутов дорог и зданий.</template>
+      <template v-else>Каждая машина едет по полосе, уступает, стоит на светофорах и иногда нарушает.</template>
     </p>
   </div>
 
+  <SignalSummary v-if="selectedSignalNode !== null" :key="selectedSignalNode" :node="selectedSignalNode" />
+  <div v-else-if="sim.net?.signals.length" class="section">
+    <p class="hint muted">Щёлкните по светофору на карте, чтобы увидеть и поменять, сколько горит каждый сигнал.</p>
+  </div>
+
   <div class="section">
-    <div class="field">
-      <label>Период</label>
-      <div class="segmented" role="group" aria-label="Период">
-        <button
-          v-for="item in periods"
-          :key="item.id"
-          :class="{ active: sim.period === item.id }"
-          :aria-pressed="sim.period === item.id"
-          @click="sim.period = item.id"
-        >
-          {{ item.label }}
-        </button>
-      </div>
+    <div class="eyebrow">Последовательность расчёта</div>
+    <ol class="procedure">
+      <li v-for="step in sim.procedure" :key="step.id">
+        <Check :size="12" class="done" aria-hidden="true" />
+        <div>
+          <strong>{{ step.title }}</strong>
+          <span v-if="step.ms !== null" class="faint ms">{{ Math.max(1, Math.round(step.ms)) }} мс</span>
+          <div class="muted detail">{{ step.detail }}</div>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <div class="eyebrow">Спрос</div>
+    <div class="segmented" role="group" aria-label="Период">
+      <button v-for="item in periods" :key="item.id" :class="{ active: sim.period === item.id }" :aria-pressed="sim.period === item.id" @click="sim.period = item.id">
+        {{ item.label }}
+      </button>
     </div>
-    <div class="field">
-      <label for="sim-demand">Спрос: {{ Math.round(sim.demand * 100) }}%</label>
-      <input id="sim-demand" class="range" type="range" min="0.2" max="2" step="0.1" :value="sim.demand" @change="setDemand" />
-    </div>
+    <label class="slider">
+      <span>Уровень спроса: {{ Math.round(sim.demand * 100) }}%</span>
+      <input type="range" min="0.2" max="2" step="0.1" :value="sim.demand" @change="setDemand" />
+    </label>
+    <label class="check"><input v-model="sim.transitOn" type="checkbox" /> Учитывать линии ОТ: {{ sim.services.length }}</label>
+    <label class="check"><input v-model="sim.guessSignals" type="checkbox" /> Светофоры на пересечениях крупных дорог</label>
   </div>
 
   <template v-if="sim.level === 'micro'">
     <div class="section">
       <div class="row">
         <button class="btn primary grow" @click="sim.togglePlay">
-          <Pause v-if="sim.running" :size="14" aria-hidden="true" />
-          <Play v-else :size="14" aria-hidden="true" />
-          {{ sim.running ? 'Пауза' : 'Запустить' }} <kbd>Пробел</kbd>
+          <Pause v-if="sim.running" :size="13" aria-hidden="true" />
+          <Play v-else :size="13" aria-hidden="true" />
+          {{ sim.running ? 'Пауза' : 'Запустить' }}
         </button>
-        <button class="btn" aria-label="Начать заново" title="Начать заново" @click="sim.reset">
-          <RotateCcw :size="14" />
-        </button>
+        <button class="btn" aria-label="Начать заново" title="Начать заново" @click="sim.reset"><RotateCcw :size="13" /></button>
+        <button class="btn" :class="{ on: sim.camera3d }" :aria-pressed="sim.camera3d" title="3D-вид" aria-label="3D-вид" @click="sim.camera3d = !sim.camera3d"><Box :size="13" /></button>
       </div>
       <div class="segmented" role="group" aria-label="Скорость симуляции">
-        <button
-          v-for="value in speeds"
-          :key="value"
-          :class="{ active: sim.speed === value }"
-          :aria-pressed="sim.speed === value"
-          @click="sim.speed = value"
-        >
+        <button v-for="value in speeds" :key="value" :class="{ active: sim.speed === value }" :aria-pressed="sim.speed === value" @click="sim.speed = value">
           ×{{ value }}
         </button>
       </div>
-      <button class="btn block" :class="{ on: sim.camera3d }" :aria-pressed="sim.camera3d" @click="sim.camera3d = !sim.camera3d">
-        <Box :size="14" aria-hidden="true" /> {{ sim.camera3d ? '3D-вид включён' : 'Включить 3D-вид' }}
-      </button>
-      <label class="check"><input v-model="sim.colorBySpeed" type="checkbox" /> Красить машины по скорости</label>
-      <label class="check"><input v-model="sim.guessSignals" type="checkbox" /> Светофоры на пересечениях крупных дорог</label>
+      <div class="field">
+        <label for="car-color">Цвет машин</label>
+        <select id="car-color" v-model="sim.colorMode" class="input">
+          <option value="fleet">Обычный</option>
+          <option value="speed">По скорости</option>
+          <option value="style">По стилю вождения</option>
+        </select>
+      </div>
       <label class="check"><input v-model="sim.showLoad" type="checkbox" /> Подсветка загрузки дорог</label>
     </div>
 
+    <div class="section">
+      <div class="eyebrow">Водители</div>
+      <label class="slider">
+        <span>Лихачи: {{ Math.round(sim.mix.aggressive * 100) }}%</span>
+        <input type="range" min="0" max="1" step="0.05" :value="sim.mix.aggressive" @input="setMix('aggressive', $event)" />
+      </label>
+      <label class="slider">
+        <span>Спокойные: {{ Math.round(sim.mix.calm * 100) }}%</span>
+        <input type="range" min="0" max="1" step="0.05" :value="sim.mix.calm" @input="setMix('calm', $event)" />
+      </label>
+      <p class="hint faint">Обычные: {{ Math.round(normalShare * 100) }}%. Новая доля действует на машины, которые появятся дальше.</p>
+    </div>
+
     <div v-if="sim.stats" class="section">
-      <div class="stats">
-        <div class="stat"><span class="eyebrow">Время</span><strong>{{ formatTime(sim.stats.time) }}</strong></div>
-        <div class="stat"><span class="eyebrow">Машин</span><strong>{{ sim.stats.active }}</strong></div>
-        <div class="stat"><span class="eyebrow">Ср. скорость</span><strong>{{ Math.round(sim.stats.avgSpeedKmh) }}<small> км/ч</small></strong></div>
-        <div class="stat"><span class="eyebrow">Стоят</span><strong>{{ sim.stats.stopped }}</strong></div>
-        <div class="stat"><span class="eyebrow">Доехали</span><strong>{{ sim.stats.finished }}</strong></div>
-        <div class="stat"><span class="eyebrow">Ждут въезда</span><strong>{{ sim.stats.waitingToEnter }}</strong></div>
-      </div>
+      <table class="grid">
+        <tbody>
+          <tr><th>Время модели</th><td>{{ formatTime(sim.stats.time) }}</td></tr>
+          <tr><th>Машин в сети</th><td>{{ sim.stats.active }}</td></tr>
+          <tr><th>Средняя скорость</th><td>{{ Math.round(sim.stats.avgSpeedKmh) }} км/ч</td></tr>
+          <tr><th>Стоят</th><td>{{ sim.stats.stopped }}</td></tr>
+          <tr><th>Превышают скорость</th><td>{{ sim.stats.speeding }}</td></tr>
+          <tr><th>Доехали</th><td>{{ sim.stats.finished }}</td></tr>
+          <tr><th>Ждут въезда</th><td>{{ sim.stats.waitingToEnter }}</td></tr>
+          <tr><th>Автобусов на линии</th><td>{{ sim.stats.buses }}</td></tr>
+          <tr v-for="style in DRIVER_STYLES" :key="style"><th>{{ STYLE_LABELS[style] }}</th><td>{{ sim.stats.byStyle[style] }}</td></tr>
+        </tbody>
+      </table>
       <p v-if="sim.stats.teleported > 0" class="warn">
-        <TriangleAlert :size="13" aria-hidden="true" />
+        <TriangleAlert :size="12" aria-hidden="true" />
         Снято застрявших машин: {{ sim.stats.teleported }}. Так проявляются ошибки сети и заторы без выхода.
       </p>
     </div>
 
     <div class="section">
+      <div class="eyebrow">Нарушения с начала расчёта</div>
+      <table class="grid">
+        <tbody>
+          <tr v-for="item in violations" :key="item.kind"><th>{{ item.label }}</th><td>{{ item.count }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
       <div class="eyebrow">Пробки: {{ sim.stats?.jams.length ?? 0 }}</div>
-      <p v-if="!sim.stats?.jams.length" class="muted hint">Устойчивых очередей пока нет.</p>
-      <button
-        v-for="jam in sim.stats?.jams.slice(0, 8) ?? []"
-        :key="jam.edge.id"
-        class="row-button"
-        @click="focusEdge(jam.edge.wayId)"
-      >
+      <p v-if="!sim.stats?.jams.length" class="hint muted">Устойчивых очередей пока нет.</p>
+      <button v-for="jam in sim.stats?.jams.slice(0, 8) ?? []" :key="jam.edge.id" class="row-button" @click="editor.focusWay(jam.edge.wayId)">
         <span class="ellipsis">{{ jam.edge.tags.name ?? `Дорога ${jam.edge.wayId}` }}</span>
-        <span class="faint">{{ Math.round(jam.lengthM) }} м · {{ jam.cars }} авт</span>
+        <span class="faint nums">{{ Math.round(jam.lengthM) }} м · {{ jam.cars }} авт</span>
       </button>
     </div>
   </template>
 
   <template v-else-if="totals">
     <div class="section">
-      <div class="stats">
-        <div class="stat"><span class="eyebrow">Поездок в час</span><strong>{{ Math.round(totals.trips) }}</strong></div>
-        <div class="stat"><span class="eyebrow">Ср. скорость</span><strong>{{ Math.round(totals.avgSpeedKmh) }}<small> км/ч</small></strong></div>
-        <div class="stat"><span class="eyebrow">Пробег</span><strong>{{ Math.round(totals.vehKm) }}<small> авт·км</small></strong></div>
-        <div class="stat"><span class="eyebrow">Потери времени</span><strong>{{ Math.round(totals.delayHours) }}<small> авт·ч</small></strong></div>
+      <div class="eyebrow">Показать на карте</div>
+      <div class="segmented" role="group" aria-label="Вид результата">
+        <button :class="{ active: sim.macroView === 'bars' }" :aria-pressed="sim.macroView === 'bars'" @click="sim.macroView = 'bars'">Столбики потока</button>
+        <button :class="{ active: sim.macroView === 'fill' }" :aria-pressed="sim.macroView === 'fill'" @click="sim.macroView = 'fill'">Заливка дорог</button>
       </div>
+      <label class="check"><input v-model="sim.showDesire" type="checkbox" /> Районы и линии желания</label>
+    </div>
+
+    <div class="section">
+      <table class="grid">
+        <tbody>
+          <tr><th>Поездок в час</th><td>{{ Math.round(totals.trips) }}</td></tr>
+          <tr><th>Средняя скорость</th><td>{{ Math.round(totals.avgSpeedKmh) }} км/ч</td></tr>
+          <tr><th>Пробег</th><td>{{ Math.round(totals.vehKm) }} авт·км</td></tr>
+          <tr><th>Потери времени</th><td>{{ Math.round(totals.delayHours) }} авт·ч</td></tr>
+          <tr><th>Перегружено</th><td>{{ totals.congestedKm.toFixed(1) }} из {{ totals.totalKm.toFixed(1) }} км</td></tr>
+        </tbody>
+      </table>
       <p v-if="totals.unservedTrips >= 1" class="warn">
-        <TriangleAlert :size="13" aria-hidden="true" />
+        <TriangleAlert :size="12" aria-hidden="true" />
         Без маршрута: {{ Math.round(totals.unservedTrips) }} поездок в час. Проверьте связность сети.
-      </p>
-      <p class="muted hint">
-        Спрос: {{ zoneCounts.gateways }} въездов на границе и {{ zoneCounts.internal }} районов по площади зданий.
       </p>
     </div>
 
@@ -212,24 +263,24 @@ function setDemand(event: Event): void {
       <div v-for="row in losRows" :key="row.label" class="los-row">
         <span class="swatch" :style="{ background: row.color }" aria-hidden="true" />
         <span class="los-label">{{ row.label }}</span>
-        <span class="los-title">{{ row.title }}</span>
-        <span class="los-value">{{ Math.round(row.share * 100) }}%</span>
+        <span class="muted">{{ row.title }}</span>
+        <span class="nums">{{ Math.round(row.share * 100) }}%</span>
       </div>
     </div>
 
     <div class="section">
       <div class="eyebrow">Самые загруженные участки</div>
-      <p v-if="worstLoads.length === 0" class="muted hint">Загрузка везде ниже 75% пропускной способности.</p>
-      <button v-for="load in worstLoads" :key="load.edge.id" class="row-button" @click="focusEdge(load.edge.wayId)">
+      <p v-if="worstLoads.length === 0" class="hint muted">Загрузка везде ниже 75% пропускной способности.</p>
+      <button v-for="load in worstLoads" :key="load.edge.id" class="row-button" @click="editor.focusWay(load.edge.wayId)">
         <span class="ellipsis">{{ edgeName(load) }}</span>
-        <span class="faint">{{ Math.round(load.volume) }} / {{ Math.round(load.capacity) }} · {{ Math.round(load.vc * 100) }}%</span>
+        <span class="faint nums">{{ Math.round(load.vc * 100) }}%</span>
       </button>
     </div>
   </template>
 
   <div v-if="selectedWay" class="section">
     <div class="eyebrow">Выбрано: {{ selectedWay.tags?.name ?? `дорога ${selectedWay.id}` }}</div>
-    <p v-if="selectedDirections.length === 0" class="muted hint">Эта дорога не участвует в движении автомобилей.</p>
+    <p v-if="selectedDirections.length === 0" class="hint muted">Эта дорога не участвует в движении автомобилей.</p>
     <div v-for="direction in selectedDirections" :key="String(direction.forward)" class="card">
       <div class="row">
         <strong>{{ direction.forward ? 'По ходу дороги' : 'Встречное направление' }}</strong>
@@ -239,12 +290,15 @@ function setDemand(event: Event): void {
           {{ LOS_LABELS[direction.worst.los] }}
         </span>
       </div>
-      <dl>
-        <div><dt>Поток</dt><dd>{{ Math.round(direction.worst.volume) }} авт/ч</dd></div>
-        <div><dt>Пропускная способность</dt><dd>{{ Math.round(direction.worst.capacity) }} авт/ч</dd></div>
-        <div><dt>Загрузка</dt><dd>{{ Math.round(direction.worst.vc * 100) }}%</dd></div>
-        <div><dt>Скорость</dt><dd>{{ Math.round(direction.worst.speedKmh) }} из {{ Math.round(direction.worst.freeSpeedKmh) }} км/ч</dd></div>
-      </dl>
+      <table class="grid">
+        <tbody>
+          <tr><th>Поток</th><td>{{ Math.round(direction.worst.volume) }} авт/ч</td></tr>
+          <tr v-if="direction.worst.busesPerHour > 0"><th>Автобусы</th><td>{{ direction.worst.busesPerHour.toFixed(1) }} рейсов/ч</td></tr>
+          <tr><th>Пропускная способность</th><td>{{ Math.round(direction.worst.capacity) }} авт/ч</td></tr>
+          <tr><th>Загрузка</th><td>{{ Math.round(direction.worst.vc * 100) }}%</td></tr>
+          <tr><th>Скорость</th><td>{{ Math.round(direction.worst.speedKmh) }} из {{ Math.round(direction.worst.freeSpeedKmh) }} км/ч</td></tr>
+        </tbody>
+      </table>
       <details>
         <summary>Как посчитана пропускная способность</summary>
         <ul>
@@ -254,9 +308,7 @@ function setDemand(event: Event): void {
         </ul>
       </details>
     </div>
-    <p v-if="sim.level === 'micro' && selectedMicro.length" class="muted hint">
-      Сейчас в модели: {{ selectedMicro.reduce((sum, item) => sum + item.edge.carCount, 0) }} машин.
-    </p>
+    <p v-if="sim.level === 'micro'" class="hint muted">Сейчас в модели: {{ selectedMicroCars }} машин.</p>
   </div>
 
   <div class="section">
@@ -265,68 +317,76 @@ function setDemand(event: Event): void {
 </template>
 
 <style scoped>
-h2 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
 .hint {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
 }
-.range {
-  width: 100%;
-  accent-color: var(--accent);
+.procedure {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.procedure li {
+  display: flex;
+  gap: 5px;
+}
+.procedure .done {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ok);
+}
+.ms {
+  margin-left: 5px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.detail {
+  font-size: 11px;
+}
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
 }
 .grow {
   flex: 1;
 }
 .btn.on {
+  background: var(--row-selected);
   border-color: var(--accent);
-  background: var(--accent-soft);
 }
-kbd {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.35);
-}
-.check {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-}
-.check input {
-  accent-color: var(--accent);
-}
-.stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-.stat {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 7px 9px;
-  background: rgba(0, 0, 0, 0.22);
-  border-radius: var(--radius-sm);
-}
-.stat strong {
-  font-size: 18px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.stat small {
-  color: var(--faint);
+.grid {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 11px;
+}
+.grid th,
+.grid td {
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+}
+.grid th {
+  background: var(--inset);
   font-weight: 400;
+  text-align: left;
+  color: var(--muted);
+}
+.grid td {
+  background: var(--raised);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .warn {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   margin: 0;
-  color: #fcd34d;
-  font-size: 12px;
+  color: var(--warn-text);
+  font-size: 11px;
 }
 .warn svg {
   flex: none;
@@ -334,15 +394,14 @@ kbd {
 }
 .los-row {
   display: grid;
-  grid-template-columns: 22px 16px 1fr auto;
+  grid-template-columns: 20px 12px 1fr auto;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 5px;
+  font-size: 11px;
 }
 .swatch {
   width: 20px;
-  height: 8px;
-  border-radius: 2px;
+  height: 7px;
 }
 .swatch.small {
   display: inline-block;
@@ -351,68 +410,37 @@ kbd {
 .los-label {
   font-weight: 600;
 }
-.los-title {
-  color: var(--muted);
-}
-.los-value {
+.nums {
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .row-button {
   display: flex;
   justify-content: space-between;
   gap: 8px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 2px 4px;
   background: transparent;
   border: 0;
-  border-radius: 5px;
-  font-size: 12px;
+  font-size: 11px;
   text-align: left;
 }
 .row-button:hover {
-  background: var(--raised);
-}
-.row-button .faint {
-  flex: none;
-  font-variant-numeric: tabular-nums;
-}
-.ellipsis {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: var(--row-hover);
 }
 .card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  background: rgba(0, 0, 0, 0.22);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
+  gap: 4px;
+  padding: 5px;
+  background: var(--inset);
+  font-size: 11px;
 }
 .pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   font-weight: 600;
-}
-dl {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-}
-dl > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-}
-dt {
-  color: var(--muted);
-}
-dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
 }
 details summary {
   color: var(--muted);
@@ -421,8 +449,8 @@ details summary {
 details ul {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin: 4px 0 0;
+  gap: 1px;
+  margin: 3px 0 0;
   padding: 0;
   list-style: none;
 }

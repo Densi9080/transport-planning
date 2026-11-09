@@ -191,6 +191,61 @@ export function isMovementAllowed(inArm: Arm, outArm: Arm, restrictions: Restric
   return !relevant.some((r) => r.kind === 'no' && applies(r))
 }
 
+export interface LaneConnectivity {
+  relationId: number
+  from: number
+  to: number
+  via: number
+  /** Пары полос, нумерация с нуля слева по ходу движения. */
+  pairs: [number, number][]
+}
+
+/** Разбирает значение тега: 1:1,2|2:3. В OSM полосы нумеруются с единицы, необязательные — в скобках. */
+export function parseConnectivity(value: string | undefined): [number, number][] {
+  const pairs: [number, number][] = []
+  for (const part of (value ?? '').split('|')) {
+    const [from, targets] = part.split(':')
+    const fromLane = Number.parseInt(from ?? '', 10)
+    if (!Number.isFinite(fromLane) || !targets) continue
+    for (const target of targets.split(',')) {
+      const toLane = Number.parseInt(target.replace(/[()]/g, ''), 10)
+      if (Number.isFinite(toLane)) pairs.push([fromLane - 1, toLane - 1])
+    }
+  }
+  return pairs
+}
+
+export function formatConnectivity(pairs: [number, number][]): string {
+  const byLane = new Map<number, number[]>()
+  for (const [from, to] of pairs) {
+    const list = byLane.get(from)
+    if (list) list.push(to)
+    else byLane.set(from, [to])
+  }
+  return [...byLane.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([from, targets]) => `${from + 1}:${[...new Set(targets)].sort((a, b) => a - b).map((to) => to + 1).join(',')}`)
+    .join('|')
+}
+
+export function connectivityAt(doc: OsmDoc, via: number): LaneConnectivity[] {
+  const found: LaneConnectivity[] = []
+  for (const relation of doc.relations.values()) {
+    if (relation.tags?.type !== 'connectivity') continue
+    let from: number | null = null
+    let to: number | null = null
+    let viaNode: number | null = null
+    for (const [type, ref, role] of relation.members) {
+      if (type === 'way' && role === 'from') from = ref
+      else if (type === 'way' && role === 'to') to = ref
+      else if (type === 'node' && role === 'via') viaNode = ref
+    }
+    if (viaNode !== via || from === null || to === null) continue
+    found.push({ relationId: relation.id, from, to, via, pairs: parseConnectivity(relation.tags.connectivity) })
+  }
+  return found
+}
+
 export interface Movement {
   from: Arm
   to: Arm

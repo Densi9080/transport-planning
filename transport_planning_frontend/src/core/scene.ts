@@ -18,7 +18,16 @@ import {
   trimPolyline,
   unit,
 } from './geo'
-import { DRIVABLE, isOneway, laneOffsets, type LaneProfile, totalWidth, turnAllows } from './lanes'
+import {
+  type DividerMode,
+  dividerMode,
+  DRIVABLE,
+  isOneway,
+  laneOffsets,
+  type LaneProfile,
+  totalWidth,
+  turnAllows,
+} from './lanes'
 import {
   type Arm,
   buildNetwork,
@@ -26,6 +35,7 @@ import {
   type Link,
   type Network,
   restrictionsAt,
+  connectivityAt,
   type TurnKind,
   turnKind,
 } from './topology'
@@ -54,6 +64,10 @@ export interface StaticScene {
   landuse: FeatureCollection
   rail: FeatureCollection
   water: FeatureCollection
+  /** Прочие площадные и линейные объекты: ограды, платформы и всё, что не вошло в слои выше. */
+  other: FeatureCollection
+  /** Точечные объекты с атрибутами: магазины, остановки, шлагбаумы. */
+  points: FeatureCollection
 }
 
 const EMPTY = (): Feature[] => []
@@ -66,6 +80,7 @@ const ZEBRA_STRIPE_M = 0.55
 const ZEBRA_GAP_M = 0.65
 const ZEBRA_DEPTH_M = 3.2
 const ELEVATED_STEP_M = 4
+const HALF_DIVIDER_M = 0.12
 const MIN_VISIBLE_HEIGHT_M = 0.15
 const DECK_THICKNESS_M = 0.5
 
@@ -224,8 +239,22 @@ function laneMarkingsFor(
   if (noLines) return
 
   if (profile.forward > 0 && profile.backward > 0) line(offsets.divider, 'divider')
-  for (let i = 1; i < profile.forward; i++) line(offsets.divider - i * profile.laneWidth, 'lane')
-  for (let i = 1; i < profile.backward; i++) line(offsets.divider + i * profile.laneWidth, 'lane')
+  // Линия показывает правило: пунктир можно пересекать, сплошную нельзя, а двойная разрешает только с одной стороны
+  const divider = (offset: number, mode: DividerMode, leftSide: number) => {
+    if (mode === 'both') line(offset, 'lane')
+    else if (mode === 'none') line(offset, 'lane-solid')
+    else {
+      const dashedSide = mode === 'to_right' ? leftSide : -leftSide
+      line(offset + dashedSide * HALF_DIVIDER_M, 'lane')
+      line(offset - dashedSide * HALF_DIVIDER_M, 'lane-solid')
+    }
+  }
+  for (let i = 1; i < profile.forward; i++) {
+    divider(offsets.divider - i * profile.laneWidth, dividerMode(profile.changeForward, i - 1), 1)
+  }
+  for (let i = 1; i < profile.backward; i++) {
+    divider(offsets.divider + i * profile.laneWidth, dividerMode(profile.changeBackward, i - 1), -1)
+  }
 }
 
 function arrowName(turn: string | undefined): string {
@@ -350,6 +379,7 @@ export function junctionConnectors(
   geometries: Map<Arm, ArmGeometry>,
 ): Connector[] {
   const restrictions = restrictionsAt(doc, node)
+  const explicit = connectivityAt(doc, node)
   const connectors: Connector[] = []
   // Стык двух дорог — это продолжение одной дороги, а не поворот
   const continuation = arms.length === 2
@@ -369,12 +399,19 @@ export function junctionConnectors(
         const kind = turnKind(from, to)
         if (!continuation && kind === 'reverse') continue
         if (!isMovementAllowed(from, to, restrictions)) continue
-        const lanes = continuation
-          ? Array.from({ length: from.lanesIn }, (_, i) => i)
-          : lanesForTurn(from, kind, kinds, ignoreTags)
         const toGeometry = geometries.get(to)!
-        lanes.forEach((lane, index) => {
-          const toLane = outLaneFor(index, lanes.length, to.lanesOut, continuation ? 'through' : kind)
+        const rule = explicit.find((item) => item.from === from.link.wayId && item.to === to.link.wayId)
+        let pairs: [number, number][]
+        if (rule) {
+          // Заданные вручную соединения важнее разметки: так разрешают манёвр и с «неправильной» полосы
+          pairs = rule.pairs.filter(([a, b]) => a >= 0 && a < from.lanesIn && b >= 0 && b < to.lanesOut)
+        } else {
+          const lanes = continuation
+            ? Array.from({ length: from.lanesIn }, (_, i) => i)
+            : lanesForTurn(from, kind, kinds, ignoreTags)
+          pairs = lanes.map((lane, index) => [lane, outLaneFor(index, lanes.length, to.lanesOut, continuation ? 'through' : kind)])
+        }
+        pairs.forEach(([lane, toLane]) => {
           const start = lanePoint(fromGeometry, lane, true)
           const end = lanePoint(toGeometry, toLane, false)
           const travelIn = scale(from.dir, -1)
@@ -430,6 +467,7 @@ function zebra(
   dir: XY,
   width: number,
   wayId: number,
+  node: number,
   output: Feature[],
   projector: Projector,
 ): void {
@@ -451,7 +489,7 @@ function zebra(
           sub(add(c, halfStripe), halfLength),
         ],
         projector,
-        { wayId },
+        { wayId, node },
       ),
     )
   }
@@ -475,7 +513,7 @@ function buildCrossings(
       for (let i = 1; i <= index; i++) along += dist(link.points[i - 1]!, link.points[i]!)
       const { point, dir } = pointAlong(link.points, along)
       if (tags.highway === 'crossing' || tags.crossing) {
-        zebra(point, dir, totalWidth(link.profile), link.wayId, crossings, projector)
+        zebra(point, dir, totalWidth(link.profile), link.wayId, id, crossings, projector)
       }
       if (tags.highway === 'traffic_signals' && !seenSignal.has(id)) {
         seenSignal.add(id)
@@ -521,7 +559,7 @@ function buildLabels(network: Network, labels: Feature[], projector: Projector, 
     let rot = bearing(dir) - 90
     if (rot > 90) rot -= 180
     if (rot < -90) rot += 180
-    labels.push(pointFeature(point, projector, { name, rot }))
+    labels.push(pointFeature(point, projector, { name, rot, wayId: link.wayId }))
   }
 }
 
@@ -681,6 +719,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
 }
 
 const LANDUSE_KEYS = ['landuse', 'leisure', 'natural', 'amenity'] as const
+const POINT_OBJECT_KEYS = new Set(['amenity', 'shop', 'barrier', 'public_transport', 'tourism', 'office', 'leisure', 'man_made', 'emergency', 'railway', 'highway'])
 const WATER_VALUES = new Set(['water', 'wetland', 'riverbank'])
 
 function isClosed(way: OWay): boolean {
@@ -693,6 +732,19 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
   const landuse: Feature[] = []
   const rail: Feature[] = []
   const water: Feature[] = []
+  const other: Feature[] = []
+  const points: Feature[] = []
+
+  for (const node of doc.nodes.values()) {
+    const tags = node.tags
+    if (!tags || tags.highway === 'traffic_signals' || tags.highway === 'crossing') continue
+    if (!Object.keys(tags).some((key) => POINT_OBJECT_KEYS.has(key))) continue
+    points.push({
+      type: 'Feature',
+      properties: { node: node.id },
+      geometry: { type: 'Point', coordinates: [node.lon, node.lat] },
+    })
+  }
 
   for (const way of doc.ways.values()) {
     const tags = way.tags ?? {}
@@ -704,14 +756,17 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
     if (coordinates.length < 2) continue
 
     if (tags.railway && tags.railway !== 'platform' && !isClosed(way)) {
-      rail.push({ type: 'Feature', properties: { railway: tags.railway }, geometry: { type: 'LineString', coordinates } })
+      rail.push({ type: 'Feature', properties: { wayId: way.id, railway: tags.railway }, geometry: { type: 'LineString', coordinates } })
       continue
     }
     if (tags.waterway) {
-      water.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } })
+      water.push({ type: 'Feature', properties: { wayId: way.id }, geometry: { type: 'LineString', coordinates } })
       continue
     }
-    if (!isClosed(way) || coordinates.length !== way.nds.length) continue
+    if (!isClosed(way) || coordinates.length !== way.nds.length) {
+      other.push({ type: 'Feature', properties: { wayId: way.id }, geometry: { type: 'LineString', coordinates } })
+      continue
+    }
 
     if (tags.building && tags.building !== 'no') {
       const levels = Number.parseFloat(tags['building:levels'] ?? '')
@@ -719,6 +774,7 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
       buildings.push({
         type: 'Feature',
         properties: {
+          wayId: way.id,
           height: Number.isFinite(height) ? height : (Number.isFinite(levels) ? levels : 4) * 3.2,
         },
         geometry: { type: 'Polygon', coordinates: [coordinates] },
@@ -726,7 +782,7 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
       continue
     }
     if (tags.natural && WATER_VALUES.has(tags.natural)) {
-      water.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [coordinates] } })
+      water.push({ type: 'Feature', properties: { wayId: way.id }, geometry: { type: 'Polygon', coordinates: [coordinates] } })
       continue
     }
     if (LANDUSE_KEYS.some((key) => tags[key])) {
@@ -736,9 +792,11 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
         )
       landuse.push({
         type: 'Feature',
-        properties: { green },
+        properties: { green, wayId: way.id },
         geometry: { type: 'Polygon', coordinates: [coordinates] },
       })
+    } else {
+      other.push({ type: 'Feature', properties: { wayId: way.id }, geometry: { type: 'LineString', coordinates } })
     }
   }
   return {
@@ -746,6 +804,8 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
     landuse: collection(landuse),
     rail: collection(rail),
     water: collection(water),
+    other: collection(other),
+    points: collection(points),
   }
 }
 

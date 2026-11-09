@@ -3,6 +3,15 @@ import uuid
 from django.db import models
 
 
+class AssistantSettings(models.Model):
+    """Подключение помощника к модели: одна запись на весь сервер."""
+
+    base_url = models.CharField(max_length=500, blank=True)
+    model = models.CharField(max_length=200, blank=True)
+    api_key = models.CharField(max_length=500, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class Project(models.Model):
     """Исходный .osm без изменений и список правок поверх него."""
 

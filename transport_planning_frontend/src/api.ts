@@ -1,3 +1,4 @@
+import type { ChatMessage, ToolCall, ToolDefinition } from './assistant/agent'
 import type { Changes, RawDocument } from './core/types'
 
 export interface ProjectSummary {
@@ -73,4 +74,43 @@ export async function runPreflight(id: string, changes: Changes): Promise<Prefli
   return (
     await ensureOk(await fetch(`/api/projects/${id}/preflight/`, jsonRequest('POST', { changes })))
   ).json()
+}
+
+export interface AssistantSettings {
+  baseUrl: string
+  model: string
+  hasKey: boolean
+  locked: boolean
+  configured: boolean
+}
+
+export interface AssistantReply {
+  message: { content: string; tool_calls?: ToolCall[] }
+  usage?: { total_tokens?: number } | null
+}
+
+export async function getAssistantSettings(): Promise<AssistantSettings> {
+  return (await ensureOk(await fetch('/api/assistant/settings/'))).json()
+}
+
+export async function saveAssistantSettings(payload: {
+  baseUrl?: string
+  model?: string
+  apiKey?: string
+  clearKey?: boolean
+}): Promise<AssistantSettings> {
+  return (await ensureOk(await fetch('/api/assistant/settings/', jsonRequest('PUT', payload)))).json()
+}
+
+export async function testAssistant(payload: { baseUrl: string; apiKey: string }): Promise<{ ok: boolean; models: string[] }> {
+  return (await ensureOk(await fetch('/api/assistant/test/', jsonRequest('POST', payload)))).json()
+}
+
+export async function assistantChat(
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+  signal?: AbortSignal,
+): Promise<AssistantReply> {
+  const request = { ...jsonRequest('POST', { messages, tools }), signal }
+  return (await ensureOk(await fetch('/api/assistant/chat/', request))).json()
 }

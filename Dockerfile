@@ -28,4 +28,4 @@ RUN mkdir -p /data
 
 EXPOSE 8000
 VOLUME ["/data"]
-CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn transport_planning.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 180"]
+CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn transport_planning.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 4 --timeout 320"]

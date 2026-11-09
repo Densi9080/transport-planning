@@ -26,6 +26,7 @@ export type IssueCode =
   | 'duplicate_nodes'
   | 'no_lanes'
   | 'steep_slope'
+  | 'lane_change_mismatch'
 
 export interface Issue {
   id: string
@@ -57,6 +58,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   duplicate_nodes: 'Узлы в одной точке',
   no_lanes: 'Не указано число полос',
   steep_slope: 'Слишком крутой уклон',
+  lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
 }
 
 const BROKEN_JUNCTION_M = 4
@@ -188,6 +190,23 @@ function checkTags({ doc, ways, issues }: Context): void {
               fix: () => setWayTags(doc, way.id, { ...way.tags, lanes: String(fixed) }),
             }
           : {}),
+      })
+    }
+
+    const changes: [string[] | null, number, string][] = [
+      [profile.changeForward, profile.forward, 'по ходу дороги'],
+      [profile.changeBackward, profile.backward, 'встречном направлении'],
+    ]
+    for (const [rules, count, side] of changes) {
+      if (!rules || rules.length === count || count === 0) continue
+      issues.push({
+        id: `change-${way.id}-${side}`,
+        code: 'lane_change_mismatch',
+        severity: 'warning',
+        message: `${label(way)}: ${rules.length} правил change:lanes на ${count} полос в ${side}`,
+        position,
+        wayIds: [way.id],
+        nodeIds: [],
       })
     }
 

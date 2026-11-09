@@ -1,9 +1,11 @@
 import type { OsmDoc } from '@/core/doc'
 import { dist } from '@/core/geo'
 import { totalWidth } from '@/core/lanes'
+import { greenShare } from '@/core/signals'
 import type { XY } from '@/core/types'
 
 import { classRank, type SimEdge, type SimNet } from './net'
+import type { TransitService } from './transit'
 
 /**
  * Макроуровень: загрузка сети за час без отдельных машин.
@@ -31,6 +33,10 @@ export interface EdgeLoad {
   freeTimeS: number
   nodeDelayS: number
   volume: number
+  /** Поток транспорта общего пользования, приведённые авт/ч. */
+  transitPcu: number
+  /** Автобусов и троллейбусов в час. */
+  busesPerHour: number
   vc: number
   timeS: number
   speedKmh: number
@@ -60,11 +66,21 @@ export interface OdFlow {
   routes: OdRoute[]
 }
 
+export interface LineResult {
+  service: TransitService
+  freeTimeS: number
+  timeS: number
+  speedKmh: number
+  /** Самый загруженный участок маршрута. */
+  worstVc: number
+}
+
 export interface MacroResult {
   params: MacroParams
   loads: Map<SimEdge, EdgeLoad>
   zones: Zone[]
   flows: OdFlow[]
+  lines: LineResult[]
   totals: {
     trips: number
     unservedTrips: number
@@ -119,9 +135,9 @@ const BPR_ALPHA = 0.15
 const BPR_BETA = 4
 const MSA_ITERATIONS = 8
 const FREE_FLOW_SHARE = 0.9
-const GREEN_SHARE = 0.55
+const PCU_PER_BUS = 2.5
+const STOP_DWELL_S = 20
 const MINOR_APPROACH_SHARE = 0.7
-const SIGNAL_DELAY_S = 18
 const MINOR_DELAY_S = 5
 const TURN_DELAY_S = { left: 6, right: 3, through: 0, reverse: 12 }
 const GRID_M = 280
@@ -168,8 +184,18 @@ export function parseSpeed(value: string | undefined, highway: string): number {
   return value.includes('mph') ? number * 1.609 : number
 }
 
-function isSignalNode(doc: OsmDoc, node: number): boolean {
-  return doc.nodes.get(node)?.tags?.highway === 'traffic_signals'
+/** Доля зелёного и цикл светофора на выезде с участка: берётся лучший манёвр подхода. */
+function signalOf(edge: SimEdge): { share: number; cycle: number } | null {
+  let best: { share: number; cycle: number } | null = null
+  for (const lane of edge.lanes) {
+    for (const connector of lane.connectors) {
+      const group = connector.signal
+      if (!group) continue
+      const share = greenShare(group.plan, connector.phases)
+      if (!best || share > best.share) best = { share, cycle: group.cycle }
+    }
+  }
+  return best
 }
 
 /** Пропускная способность и свободная скорость направления: всё берётся из атрибутов УДС. */
@@ -197,9 +223,11 @@ export function edgeBaseLoad(doc: OsmDoc, net: SimNet, edge: SimEdge): EdgeLoad 
 
   const speed = parseSpeed(tags.maxspeed, highway)
   let nodeDelay = 0
-  if (isSignalNode(doc, edge.to)) {
-    apply(GREEN_SHARE, 'Светофор на выезде: доля зелёного')
-    nodeDelay = SIGNAL_DELAY_S
+  const signal = signalOf(edge)
+  if (signal) {
+    apply(Math.max(signal.share, 0.05), `Светофор: зелёный ${Math.round(signal.share * 100)}% цикла ${signal.cycle} с`)
+    // Средняя задержка равномерно прибывающего потока по Вебстеру
+    nodeDelay = (signal.cycle * (1 - signal.share) ** 2) / 2
   } else {
     const rank = classRank(tags)
     const others = (net.outgoing.get(edge.to) ?? []).filter((other) => other.wayId !== edge.wayId)
@@ -220,6 +248,8 @@ export function edgeBaseLoad(doc: OsmDoc, net: SimNet, edge: SimEdge): EdgeLoad 
     freeTimeS,
     nodeDelayS: nodeDelay,
     volume: 0,
+    transitPcu: 0,
+    busesPerHour: 0,
     vc: 0,
     timeS: freeTimeS + nodeDelay,
     speedKmh: freeSpeedKmh,
@@ -549,7 +579,7 @@ function extractPath(router: RouterIndex, net: SimNet, destination: number, dist
 }
 
 function updateLoad(load: EdgeLoad): void {
-  load.vc = load.volume / load.capacity
+  load.vc = (load.volume + load.transitPcu) / load.capacity
   const running = load.freeTimeS * (1 + BPR_ALPHA * Math.min(load.vc, BPR_VC_LIMIT) ** BPR_BETA)
   load.timeS = running + load.nodeDelayS
   load.speedKmh = (load.edge.length / running) * 3.6
@@ -580,9 +610,19 @@ function gravity(zones: Zone[], demand: number): { from: Zone; to: Zone; trips: 
   return pairs
 }
 
-export function runMacro(doc: OsmDoc, net: SimNet, params: MacroParams): MacroResult {
+export function runMacro(doc: OsmDoc, net: SimNet, params: MacroParams, services: TransitService[] = []): MacroResult {
   const loads = new Map<SimEdge, EdgeLoad>()
   for (const edge of net.edges) loads.set(edge, edgeBaseLoad(doc, net, edge))
+  // Автобусы идут по расписанию и занимают дорогу ещё до того, как распределятся машины
+  for (const service of services) {
+    for (const edge of service.edges) {
+      const load = loads.get(edge)
+      if (!load) continue
+      load.busesPerHour += service.frequency
+      load.transitPcu += service.frequency * PCU_PER_BUS
+    }
+  }
+  for (const load of loads.values()) updateLoad(load)
 
   const core = coreEdges(net)
   const gateways = buildGateways(net, doc, loads, core)
@@ -666,11 +706,29 @@ export function runMacro(doc: OsmDoc, net: SimNet, params: MacroParams): MacroRe
     if (load.los >= 4) congestedKm += km
   }
 
+  const lines: LineResult[] = services.map((service) => {
+    let freeTimeS = 0
+    let timeS = 0
+    let worstVc = 0
+    for (const edge of service.edges) {
+      const load = loads.get(edge)
+      if (!load) continue
+      freeTimeS += load.freeTimeS
+      timeS += load.timeS
+      worstVc = Math.max(worstVc, load.vc)
+    }
+    const dwell = service.stops.length * STOP_DWELL_S
+    timeS += dwell
+    freeTimeS += dwell
+    return { service, freeTimeS, timeS, speedKmh: timeS > 0 ? (service.lengthM / timeS) * 3.6 : 0, worstVc }
+  })
+
   return {
     params,
     loads,
     zones,
     flows,
+    lines,
     totals: {
       trips: pairs.reduce((sum, pair) => sum + pair.trips, 0),
       unservedTrips: [...unserved].reduce((sum, pair) => sum + pair.trips, 0),

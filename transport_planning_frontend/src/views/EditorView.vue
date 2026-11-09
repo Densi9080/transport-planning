@@ -1,23 +1,29 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, watch } from 'vue'
 
-import BasemapBar from '@/components/BasemapBar.vue'
+import AppToolbar from '@/components/AppToolbar.vue'
+import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
+import JunctionEditor from '@/components/JunctionEditor.vue'
+import LeftDock from '@/components/LeftDock.vue'
+import LegendBox from '@/components/LegendBox.vue'
+import ListDock from '@/components/ListDock.vue'
 import MapCanvas from '@/components/MapCanvas.vue'
-import NavigatorPanel from '@/components/NavigatorPanel.vue'
-import ToolDock from '@/components/ToolDock.vue'
-import TopBar from '@/components/TopBar.vue'
+import MenuBar from '@/components/MenuBar.vue'
+import StatusBar from '@/components/StatusBar.vue'
+import TrafficOptions from '@/components/TrafficOptions.vue'
 import { parseProfile, withLanes } from '@/core/lanes'
+import { useAssistant } from '@/stores/assistant'
 import { type Tool, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
 
 const props = defineProps<{ id: string }>()
 const editor = useEditor()
 const sim = useSimulation()
-const canvas = ref<InstanceType<typeof MapCanvas> | null>(null)
+const assistant = useAssistant()
 
 const TOOL_KEYS: Record<string, Tool> = {
   v: 'select',
@@ -59,11 +65,18 @@ function changeLanes(delta: number): void {
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
   // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
-  if (editor.exportOpen || editor.helpOpen) return
+  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen) return
   const key = event.key.toLowerCase()
   const code = event.code
 
-  // В симуляции граф не правится: иначе модель считала бы уже не ту сеть
+  if ((event.ctrlKey || event.metaKey) && (code === 'KeyZ' || code === 'KeyY')) {
+    event.preventDefault()
+    if (code === 'KeyY' || event.shiftKey) editor.redo()
+    else editor.undo()
+    return
+  }
+
+  // Инструментами в симуляции граф не правится, а отмену расчёт подхватит сам
   if (editor.viewMode === 'sim') {
     if (code === 'Space') {
       event.preventDefault()
@@ -77,12 +90,6 @@ function onKeyDown(event: KeyboardEvent): void {
     return
   }
 
-  if ((event.ctrlKey || event.metaKey) && (code === 'KeyZ' || code === 'KeyY')) {
-    event.preventDefault()
-    if (code === 'KeyY' || event.shiftKey) editor.redo()
-    else editor.undo()
-    return
-  }
   if ((event.ctrlKey || event.metaKey) && code === 'KeyD') {
     event.preventDefault()
     editor.duplicateSelected()
@@ -138,7 +145,11 @@ function onKeyDown(event: KeyboardEvent): void {
       editor.joinSelected()
       break
     case 'h':
-      canvas.value?.fitToBounds()
+      editor.fitRev++
+      break
+    case 'e':
+      if (editor.selectedNodes[0]) editor.openJunction(editor.selectedNodes[0].id)
+      else editor.toast('Выберите узел, чтобы открыть его редактор')
       break
   }
   if (code === 'BracketRight' || key === ']') changeLanes(1)
@@ -162,7 +173,7 @@ onBeforeUnmount(() => {
 
 watch(() => props.id, (id) => void editor.open(id))
 
-// Свёрнутый инспектор открывается при выборе объекта, иначе клик выглядит безрезультатным
+// Свёрнутый быстрый просмотр открывается при выборе объекта, иначе щелчок выглядит безрезультатным
 watch(
   () => editor.selection,
   (next, previous) => {
@@ -190,7 +201,7 @@ watch(
 </script>
 
 <template>
-  <div class="editor">
+  <div class="app">
     <div v-if="editor.loadError" class="state" role="alert">
       <strong>Не удалось открыть проект</strong>
       <p class="muted">{{ editor.loadError }}</p>
@@ -200,37 +211,66 @@ watch(
       Читаем граф…
     </div>
     <template v-else>
-      <div class="stage" :class="{ split: editor.compareOpen }">
-        <MapCanvas ref="canvas" :key="id" />
+      <MenuBar />
+      <AppToolbar />
+      <div class="workspace">
+        <LeftDock v-show="editor.navigatorOpen" />
+        <div class="center">
+          <div class="stage">
+            <div class="map-slot" :class="{ split: editor.compareOpen }">
+              <MapCanvas :key="id" />
+              <LegendBox />
+            </div>
+            <CompareMap v-if="editor.compareOpen" />
+            <TrafficOptions />
+            <div class="toasts" aria-live="polite">
+              <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
+                {{ item.text }}
+              </div>
+            </div>
+          </div>
+          <ListDock v-if="editor.listOpen" />
+        </div>
+        <InspectorPanel v-show="editor.inspectorOpen" />
       </div>
-      <CompareMap v-if="editor.compareOpen" />
-      <TopBar />
-      <NavigatorPanel v-show="editor.navigatorOpen" />
-      <InspectorPanel v-show="editor.inspectorOpen" />
-      <ToolDock v-if="editor.viewMode !== 'sim'" />
-      <BasemapBar />
+      <StatusBar />
       <ExportDialog v-if="editor.exportOpen" />
       <HelpDialog v-if="editor.helpOpen" />
-      <div class="toasts" aria-live="polite">
-        <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
-          {{ item.text }}
-        </div>
-      </div>
+      <JunctionEditor v-if="editor.junctionNode !== null" :key="editor.junctionNode" />
+      <AssistantSettingsDialog v-if="assistant.settingsOpen" />
     </template>
   </div>
 </template>
 
 <style scoped>
-.editor {
+.app {
   position: fixed;
   inset: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.map-slot {
   position: absolute;
   inset: 0;
 }
-.stage.split {
+.map-slot.split {
   right: 50%;
 }
 .state {
@@ -250,28 +290,27 @@ watch(
 }
 .toasts {
   position: absolute;
-  top: 58px;
+  top: 10px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   pointer-events: none;
   z-index: 30;
 }
 .toast {
-  padding: 6px 12px;
-  background: var(--panel-solid);
+  padding: 4px 10px;
+  background: var(--raised);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
 }
 .toast.error {
   border-color: var(--err);
-  color: #fecaca;
+  color: var(--err-text);
 }
 .toast.success {
-  border-color: rgba(34, 197, 94, 0.6);
+  border-color: var(--ok);
 }
 </style>

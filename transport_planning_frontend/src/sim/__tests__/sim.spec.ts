@@ -79,16 +79,14 @@ describe('сеть симуляции', () => {
     const { net } = setup(crossroads({ highway: 'traffic_signals' }))
     expect(net.signals).toHaveLength(1)
     const group = net.signals[0]!
+    const main = net.connectors.find((c) => c.fromLane.edge.wayId === 10 && c.toLane.edge.wayId === 11)!
+    const cross = net.connectors.find((c) => c.fromLane.edge.wayId === 20 && c.toLane.edge.wayId === 21)!
     for (let t = 0; t < group.cycle; t++) {
-      const a = signalState(group, 0, t)
-      const b = signalState(group, 1, t)
+      const a = signalState(main, t)
+      const b = signalState(cross, t)
       expect(a !== 'red' && b !== 'red').toBe(false)
     }
-    const phases = new Set(net.connectors.map((c) => c.phase))
-    expect(phases.size).toBe(2)
-    const mainPhase = net.connectors.find((c) => c.fromLane.edge.wayId === 10 && c.toLane.edge.wayId === 11)!.phase
-    const crossPhase = net.connectors.find((c) => c.fromLane.edge.wayId === 20 && c.toLane.edge.wayId === 21)!.phase
-    expect(mainPhase).not.toBe(crossPhase)
+    expect(main.phases).not.toEqual(cross.phases)
   })
 
   it('угадывает светофор только на перекрёстке крупных дорог', () => {
@@ -123,7 +121,8 @@ describe('макроуровень', () => {
 
     const signal = setup(crossroads({ highway: 'traffic_signals' }))
     const signalled = signal.net.edges.find((item) => item.wayId === 10 && item.forward)!
-    expect(edgeBaseLoad(signal.doc, signal.net, signalled).capacity).toBeCloseTo(1650)
+    // Две фазы: 33,5 с полезного зелёного из 64-секундного цикла
+    expect(edgeBaseLoad(signal.doc, signal.net, signalled).capacity).toBeCloseTo((3000 * 33.5) / 64)
   })
 
   it('больше полос даёт меньшую загрузку', () => {
@@ -220,7 +219,7 @@ describe('настоящий файл', () => {
   it('микромодель едет без наложений и почти без застреваний', () => {
     const { doc, net } = setup(raw, true)
     const macro = runMacro(doc, net, { period: 'morning', demand: 1 })
-    const sim = new MicroSim(net, macro.flows, 1)
+    const sim = new MicroSim(net, macro.flows, { scale: 1 })
     runFor(sim, 600, () => assertOrder(net))
     const stats = sim.stats()
     expect(stats.spawned).toBeGreaterThan(200)

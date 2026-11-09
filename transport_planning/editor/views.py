@@ -11,6 +11,7 @@ from django.views.static import serve
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from . import assistant
 from .models import Project
 from .osm_io import ChangesError, OsmFormatError, apply_changes, parse_document
 from .preflight import run_preflight
@@ -106,6 +107,38 @@ class ProjectPreflightView(APIView):
         except (ChangesError, OsmFormatError) as exc:
             return Response({'detail': str(exc)}, status=400)
         return Response(run_preflight(output))
+
+
+class AssistantSettingsView(APIView):
+    def get(self, request):
+        return Response(assistant.public_settings())
+
+    def put(self, request):
+        try:
+            assistant.save_settings(request.data if isinstance(request.data, dict) else {})
+        except assistant.AssistantError as exc:
+            return Response({'detail': exc.message}, status=exc.status)
+        return Response(assistant.public_settings())
+
+
+class AssistantTestView(APIView):
+    """Проверка подключения: список моделей заодно подсказывает, что можно выбрать."""
+
+    def post(self, request):
+        try:
+            models = assistant.list_models(request.data if isinstance(request.data, dict) else {})
+        except assistant.AssistantError as exc:
+            return Response({'detail': exc.message}, status=exc.status)
+        return Response({'ok': True, 'models': models})
+
+
+class AssistantChatView(APIView):
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            return Response(assistant.chat(data.get('messages'), data.get('tools')))
+        except assistant.AssistantError as exc:
+            return Response({'detail': exc.message}, status=exc.status)
 
 
 def frontend_index(request):

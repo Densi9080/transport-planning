@@ -25,8 +25,17 @@ export const SOURCE_IDS = [
   'labels',
   'elevated',
   'simLoad',
+  'simBars',
+  'simBarLabels',
+  'simOd',
+  'simZones',
   'simJams',
   'simSignals',
+  'other',
+  'points',
+  'transitLines',
+  'transitStops',
+  'transitLabels',
   'graphLinks',
   'graphNodes',
   'issues',
@@ -88,6 +97,7 @@ export function emptySources(): Record<string, SourceSpecification> {
   }
   // Загрузка меняется часто, а геометрия — нет: перекрашиваем дороги через состояние объекта
   sources.simLoad = { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'id' }
+  sources.simBars = { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'id' }
   return sources
 }
 
@@ -124,6 +134,11 @@ export function buildLayers(lat: number): LayerSpecification[] {
     { id: 'buildings', type: 'fill', source: 'buildings', paint: {
       'fill-color': COLORS.building,
       'fill-outline-color': COLORS.buildingEdge,
+    } },
+    { id: 'other', type: 'line', source: 'other', paint: {
+      'line-color': COLORS.minor,
+      'line-width': 0.8,
+      'line-opacity': 0.55,
     } },
     { id: 'rail', type: 'line', source: 'rail', paint: {
       'line-color': COLORS.rail,
@@ -169,6 +184,10 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-width': m(0.16, 0.5),
       'line-opacity': 0.85,
       'line-dasharray': [12, 18],
+    } },
+    { id: 'markings-lane-solid', type: 'line', source: 'markings', minzoom: 15.5, filter: ['all', ground, ['==', ['get', 'kind'], 'lane-solid']], paint: {
+      'line-color': COLORS.marking,
+      'line-width': m(0.18, 0.6),
     } },
     { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, paint: {
       'line-color': ['match', ['get', 'turn'], 'left', COLORS.left, 'right', COLORS.right, COLORS.through],
@@ -245,6 +264,42 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-width': 1.5,
     } },
 
+    { id: 'points', type: 'circle', source: 'points', minzoom: 15.5, paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 15.5, 1.5, 19, 4],
+      'circle-color': COLORS.minor,
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 0.6,
+    } },
+    { id: 'transit-all', type: 'line', source: 'transitLines', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': '#7c3aed',
+      'line-width': ['interpolate', ['linear'], ['get', 'count'], 1, 1.5, 12, 7],
+      'line-opacity': 0.55,
+    } },
+    { id: 'transit-selected', type: 'line', source: 'transitLines', filter: ['==', ['get', 'selected'], true], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': ['get', 'color'],
+      'line-width': 6,
+    } },
+    { id: 'transit-direction', type: 'symbol', source: 'transitLines', filter: ['==', ['get', 'selected'], true], layout: {
+      'symbol-placement': 'line',
+      'symbol-spacing': 80,
+      'icon-image': 'direction',
+      'icon-rotate': 90,
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    } },
+    { id: 'transit-stops', type: 'circle', source: 'transitStops', minzoom: 14, layout: { visibility: 'none' }, paint: {
+      // zoom допустим только на верхнем уровне выражения, поэтому case лежит внутри interpolate
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, ['case', ['get', 'selected'], 7, 2.5], 18, ['case', ['get', 'selected'], 7, 5]],
+      'circle-color': ['case', ['get', 'selected'], '#ffffff', '#7c3aed'],
+      'circle-stroke-color': ['case', ['get', 'selected'], ['get', 'color'], '#ffffff'],
+      'circle-stroke-width': ['case', ['get', 'selected'], 3, 1],
+    } },
+    { id: 'transit-labels', type: 'symbol', source: 'transitLabels', layout: {
+      'icon-image': ['get', 'image'],
+      'icon-anchor': 'left',
+      'icon-offset': [14, 0],
+      'icon-allow-overlap': false,
+    } },
     { id: 'signals', type: 'symbol', source: 'signals', minzoom: 14, layout: {
       'icon-image': 'traffic-light',
       'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.55, 18, 1, 21, 1.6],
@@ -264,6 +319,38 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': false,
     } },
 
+    { id: 'sim-od', type: 'line', source: 'simOd', layout: { visibility: 'none', 'line-cap': 'round' }, paint: {
+      'line-color': '#7c3aed',
+      'line-width': ['get', 'width'],
+      'line-opacity': 0.4,
+    } },
+    { id: 'sim-zones', type: 'circle', source: 'simZones', layout: { visibility: 'none' }, paint: {
+      'circle-radius': ['get', 'radius'],
+      'circle-color': ['match', ['get', 'kind'], 'gateway', '#0b5cad', '#7c3aed'],
+      'circle-opacity': 0.75,
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1.5,
+    } },
+    { id: 'sim-bars', type: 'line', source: 'simBars', layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' }, paint: {
+      'line-color': ['match', ['coalesce', ['feature-state', 'los'], -1],
+        0, LOS_COLORS[0]!, 1, LOS_COLORS[1]!, 2, LOS_COLORS[2]!, 3, LOS_COLORS[3]!, 4, LOS_COLORS[4]!, 5, LOS_COLORS[5]!,
+        'rgba(0,0,0,0)'],
+      // Столбик растёт вместе с масштабом и лежит справа по ходу движения
+      'line-width': ['interpolate', ['exponential', 2], ['zoom'],
+        13, ['*', 0.25, ['coalesce', ['feature-state', 'w'], 0]],
+        17, ['coalesce', ['feature-state', 'w'], 0],
+        20, ['*', 4, ['coalesce', ['feature-state', 'w'], 0]]],
+      'line-offset': ['interpolate', ['exponential', 2], ['zoom'],
+        13, ['*', 0.125, ['coalesce', ['feature-state', 'w'], 0]],
+        17, ['*', 0.5, ['coalesce', ['feature-state', 'w'], 0]],
+        20, ['*', 2, ['coalesce', ['feature-state', 'w'], 0]]],
+      'line-opacity': 0.92,
+    } },
+    { id: 'sim-bar-labels', type: 'symbol', source: 'simBarLabels', minzoom: 14.5, layout: {
+      visibility: 'none',
+      'icon-image': ['get', 'image'],
+      'icon-allow-overlap': false,
+    } },
     { id: 'sim-jams', type: 'circle', source: 'simJams', layout: { visibility: 'none' }, paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 5, 18, 13],
       'circle-color': 'rgba(224,64,159,0.22)',
@@ -279,6 +366,17 @@ export function buildLayers(lat: number): LayerSpecification[] {
     { id: 'overlay-ribbon', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'ribbon'], paint: {
       'fill-color': COLORS.accent,
       'fill-opacity': 0.3,
+    } },
+    { id: 'overlay-proposal', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'proposal'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': '#f59e0b',
+      'line-width': 5,
+      'line-dasharray': [1.5, 1.2],
+    } },
+    { id: 'overlay-proposal-node', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'proposal-node'], paint: {
+      'circle-radius': 10,
+      'circle-color': 'rgba(245,158,11,0.25)',
+      'circle-stroke-color': '#f59e0b',
+      'circle-stroke-width': 2.5,
     } },
     { id: 'overlay-hover', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'hover'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': COLORS.hover,
@@ -355,12 +453,111 @@ export function buildLayers(lat: number): LayerSpecification[] {
 
 /** Какие слои видны в каждом режиме просмотра. Остальные слои зависят только от настроек. */
 export const ENGINEERING_LAYERS = [
-  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane',
+  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid',
   'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge',
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']
 export const TURN_LAYERS = ['turn-ribbon', 'turn-line']
-export const SIM_LAYERS = ['sim-load', 'sim-jams', 'sim-signals']
+export const SIM_LAYERS = ['sim-load', 'sim-bars', 'sim-bar-labels', 'sim-od', 'sim-zones', 'sim-jams', 'sim-signals']
+
+export type ThemeName = 'light' | 'dark'
+
+interface MapPalette {
+  background: string
+  building: string
+  buildingEdge: string
+  building3d: string
+  green: string
+  landuse: string
+  water: string
+  rail: string
+  minor: string
+  road: string
+  tunnel: string
+  bridge: string
+  bridgeEdge: string
+  road3d: string
+  marking: string
+  nodeFill: string
+  nodeStroke: string
+  crossing: string
+}
+
+const PALETTES: Record<ThemeName, MapPalette> = {
+  light: {
+    background: '#f4f3ee',
+    building: '#d9d6cf',
+    buildingEdge: '#bdb9af',
+    building3d: '#d2cfc7',
+    green: '#dde9d2',
+    landuse: '#ecebe4',
+    water: '#b9d8e9',
+    rail: '#8c8e93',
+    minor: '#b5b0a6',
+    road: '#868b94',
+    tunnel: '#b7bac1',
+    bridge: '#969ba4',
+    bridgeEdge: '#3f444c',
+    road3d: '#a4a8af',
+    marking: '#ffffff',
+    nodeFill: '#ffffff',
+    nodeStroke: '#20262d',
+    crossing: '#ffffff',
+  },
+  dark: {
+    background: COLORS.background,
+    building: COLORS.building,
+    buildingEdge: COLORS.buildingEdge,
+    building3d: '#4a4c52',
+    green: COLORS.green,
+    landuse: COLORS.landuse,
+    water: COLORS.water,
+    rail: COLORS.rail,
+    minor: COLORS.minor,
+    road: COLORS.road,
+    tunnel: COLORS.tunnel,
+    bridge: COLORS.bridge,
+    bridgeEdge: COLORS.bridgeEdge,
+    road3d: '#70747d',
+    marking: COLORS.marking,
+    nodeFill: '#141518',
+    nodeStroke: '#e8ecf1',
+    crossing: '#e8e3cf',
+  },
+}
+
+/** Цвета карты для темы: свойства слоёв, которые надо перекрасить. */
+export function themePaint(theme: ThemeName): [string, string, unknown][] {
+  const c = PALETTES[theme]
+  return [
+    ['background', 'background-color', c.background],
+    ['landuse', 'fill-color', ['case', ['get', 'green'], c.green, c.landuse]],
+    ['water-fill', 'fill-color', c.water],
+    ['water-line', 'line-color', c.water],
+    ['buildings', 'fill-color', c.building],
+    ['buildings', 'fill-outline-color', c.buildingEdge],
+    ['buildings-3d', 'fill-extrusion-color', c.building3d],
+    ['other', 'line-color', c.minor],
+    ['rail', 'line-color', c.rail],
+    ['minor', 'line-color', c.minor],
+    ['points', 'circle-color', c.minor],
+    ['surface-tunnel', 'fill-color', c.tunnel],
+    ['surface', 'fill-color', c.road],
+    ['junctions', 'fill-color', c.road],
+    ['surface-bridge', 'fill-color', c.bridge],
+    ['junctions-bridge', 'fill-color', c.bridge],
+    ['bridge-casing', 'line-color', c.bridgeEdge],
+    ['road-3d', 'fill-extrusion-color', c.road3d],
+    ['markings-edge', 'line-color', c.marking],
+    ['markings-divider', 'line-color', c.marking],
+    ['markings-lane', 'line-color', c.marking],
+    ['markings-lane-solid', 'line-color', c.marking],
+    ['markings-bridge', 'line-color', c.marking],
+    ['crossings', 'fill-color', c.crossing],
+    ['graph-nodes', 'circle-color', c.nodeFill],
+    ['graph-nodes', 'circle-stroke-color', c.nodeStroke],
+  ]
+}
 
 export type BasemapId = 'none' | 'satellite' | 'hybrid' | 'scheme2gis' | 'cartoDark' | 'cartoLight' | 'osm' | 'custom'
 

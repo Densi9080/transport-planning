@@ -35,10 +35,18 @@ const editor = useEditor()
 
 <style scoped>
 .options {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 8px;
+  max-width: calc(100% - 16px);
   padding: 5px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
   font-size: 12px;
   color: var(--muted);
 }

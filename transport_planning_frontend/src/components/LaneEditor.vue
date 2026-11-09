@@ -3,11 +3,14 @@ import { ArrowLeft, ArrowRight, ArrowUp, Undo2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import {
+  dividerMode,
+  type DividerMode,
   parseProfile,
   toggleTurn,
   type TravelDirection,
   type Turn,
   turnAllows,
+  withDivider,
   withTurns,
 } from '@/core/lanes'
 import type { Tags } from '@/core/types'
@@ -23,6 +26,25 @@ const buttons: { turn: Turn; check: 'left' | 'through' | 'right' | 'reverse'; ic
   { turn: 'through', check: 'through', icon: ArrowUp, label: 'Прямо' },
   { turn: 'right', check: 'right', icon: ArrowRight, label: 'Направо' },
 ]
+
+const DIVIDER_ORDER: DividerMode[] = ['both', 'none', 'to_right', 'to_left']
+const DIVIDER_TITLES: Record<DividerMode, string> = {
+  both: 'Пунктир: перестроение в обе стороны',
+  none: 'Сплошная: перестраиваться нельзя',
+  to_right: 'Двойная: только с левой полосы на правую',
+  to_left: 'Двойная: только с правой полосы на левую',
+}
+
+function dividerOf(direction: TravelDirection, boundary: number): DividerMode {
+  const rules = direction === 'forward' ? profile.value.changeForward : profile.value.changeBackward
+  return dividerMode(rules, boundary)
+}
+
+function cycleDivider(direction: TravelDirection, boundary: number): void {
+  const current = DIVIDER_ORDER.indexOf(dividerOf(direction, boundary))
+  const next = DIVIDER_ORDER[(current + 1) % DIVIDER_ORDER.length]!
+  emit('change', withDivider(props.tags, direction, boundary, next))
+}
 
 const directions = computed(() => {
   const result: { id: TravelDirection; title: string; lanes: string[] }[] = []
@@ -57,8 +79,19 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
     <div v-for="direction in directions" :key="direction.id" class="direction">
       <div class="eyebrow">{{ direction.title }}</div>
       <div class="strip" role="group" :aria-label="direction.title">
-        <div v-for="(lane, index) in direction.lanes" :key="index" class="lane">
-          <span class="lane-number faint">{{ index + 1 }}</span>
+        <template v-for="(lane, index) in direction.lanes" :key="index">
+        <button
+          v-if="index > 0"
+          class="divider"
+          :class="dividerOf(direction.id, index - 1)"
+          :title="`${DIVIDER_TITLES[dividerOf(direction.id, index - 1)]}. Нажмите, чтобы сменить`"
+          :aria-label="`Линия между полосами ${index} и ${index + 1}: ${DIVIDER_TITLES[dividerOf(direction.id, index - 1)]}`"
+          @click="cycleDivider(direction.id, index - 1)"
+        >
+          <i /><i />
+        </button>
+        <div class="lane">
+          <span class="lane-number">{{ index + 1 }}</span>
           <button
             v-for="button in buttons"
             :key="button.turn"
@@ -72,11 +105,13 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
             <component :is="button.icon" :size="14" />
           </button>
         </div>
+        </template>
       </div>
     </div>
     <p class="faint note">
-      Полосы идут слева направо по ходу движения. Манёвры записываются в turn:lanes. Полоса без
-      отметок даёт симулятору выбрать манёвр самому.
+      Полосы идут слева направо по ходу движения. Манёвры пишутся в turn:lanes. Полоса без отметок
+      даёт симулятору выбрать манёвр самому. Линия между полосами меняется щелчком и пишется в
+      change:lanes. Точные соединения полос настраиваются в редакторе узла.
     </p>
   </div>
 </template>
@@ -94,11 +129,44 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
 }
 .strip {
   display: flex;
-  gap: 2px;
-  padding: 4px;
+  gap: 0;
+  padding: 3px;
   overflow-x: auto;
-  background: #101114;
-  border-radius: var(--radius-sm);
+  background: var(--strip);
+}
+.divider {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  justify-content: center;
+  width: 16px;
+  padding: 0;
+  background: var(--lane);
+  border: 0;
+}
+.divider:hover {
+  background: var(--accent);
+}
+.divider i {
+  display: block;
+  width: 2px;
+  background: repeating-linear-gradient(#fff 0 7px, transparent 7px 13px);
+}
+.divider i + i {
+  display: none;
+}
+.divider.none i {
+  background: #fff;
+}
+.divider.to_right i + i,
+.divider.to_left i + i {
+  display: block;
+}
+.divider.to_right i:last-child {
+  background: #fff;
+}
+.divider.to_left i:first-child {
+  background: #fff;
 }
 .lane {
   flex: 1 0 44px;
@@ -107,10 +175,10 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
   align-items: center;
   gap: 2px;
   padding: 4px 2px;
-  background: #2b2d32;
-  border-radius: 3px;
+  background: var(--lane);
 }
 .lane-number {
+  color: #fff;
   font-size: 10px;
 }
 .turn {
@@ -121,16 +189,16 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
   background: transparent;
   border: 1px solid transparent;
   border-radius: 4px;
-  color: var(--faint);
+  color: rgba(255, 255, 255, 0.55);
 }
 .turn:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.5);
 }
 .turn.on {
-  background: rgba(45, 212, 191, 0.2);
-  border-color: rgba(45, 212, 191, 0.6);
-  color: #5eead4;
+  background: #0f9d8a;
+  border-color: #0b7d6e;
+  color: #fff;
 }
 .note {
   margin: 0;

@@ -3,6 +3,7 @@ import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
+import { computeHidden, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
 import { Projector, smoothCurve } from '@/core/geo'
 import {
   addNode,
@@ -33,8 +34,22 @@ import {
   smoothWay,
   toggleSign,
 } from '@/core/traffic'
+import {
+  addLineStop,
+  addLineWay,
+  createLine,
+  createStopOnWay,
+  deleteLine,
+  listLines,
+  readLine,
+  removeLineStop,
+  removeLineWay,
+  setLineTags,
+  type TransitLine,
+  type TransitMode,
+} from '@/core/transit'
 import type { LatLon, Tags } from '@/core/types'
-import type { BasemapId } from '@/map/style'
+import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 
 export type Tool =
@@ -49,6 +64,13 @@ export type Tool =
   | 'speed'
   | 'bump'
   | 'sign'
+  | 'lineWay'
+  | 'lineStop'
+
+/** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
+export type ActiveType = 'auto' | 'links' | 'nodes'
+export type LeftTab = 'network' | 'graphics' | 'filter' | 'transit' | 'issues'
+export type ListTab = 'links' | 'nodes' | 'signals' | 'lines' | 'stops' | 'zones' | 'matrix'
 export type ViewMode = 'engineering' | 'graph' | '3d' | 'sim'
 export type Basemap = BasemapId
 
@@ -88,6 +110,8 @@ const VALIDATE_DELAY_MS = 350
 const TOAST_MS = 3500
 const WIDE_SCREEN_PX = 1100
 const TILE_URL_KEY = 'osm-editor-tile-url'
+const THEME_KEY = 'osm-editor-theme'
+const FILTER_KEY = 'osm-editor-filter:'
 
 function readStored(key: string): string | null {
   try {
@@ -150,7 +174,25 @@ export const useEditor = defineStore('editor', () => {
     signals: true,
     labels: true,
     issues: true,
+    transit: false,
+    other: true,
+    points: true,
   })
+
+  const theme = ref<ThemeName>(readStored(THEME_KEY) === 'dark' ? 'dark' : 'light')
+  const activeType = ref<ActiveType>('auto')
+  const leftTab = ref<LeftTab>('network')
+  const listOpen = ref(true)
+  const listTab = ref<ListTab>('links')
+  /** Узел, открытый в редакторе узла. */
+  const junctionNode = ref<number | null>(null)
+  const junctionTab = ref<'lanes' | 'signal'>('lanes')
+  const selectedLineId = ref<number | null>(null)
+  const cursor = shallowRef<LatLon | null>(null)
+  const filterRules = ref<FilterRule[]>([])
+  const rightTab = ref<'quick' | 'assistant'>('quick')
+  /** Объекты из предложений помощника, ожидающих решения. */
+  const proposalTargets = shallowRef<{ ways: number[]; nodes: number[] } | null>(null)
 
   const issues = shallowRef<Issue[]>([])
   const focusedIssue = ref<string | null>(null)
@@ -160,12 +202,42 @@ export const useEditor = defineStore('editor', () => {
   const helpOpen = ref(false)
   const exportOpen = ref(false)
   const zoom = ref(15)
+  /** Счётчик запросов «показать весь участок». */
+  const fitRev = ref(0)
   // На узком окне панели закрыли бы карту целиком, поэтому там они изначально свёрнуты
   const wideScreen = window.innerWidth >= WIDE_SCREEN_PX
   const navigatorOpen = ref(wideScreen)
   const inspectorOpen = ref(wideScreen)
 
   watch(customTileUrl, (value) => writeStored(TILE_URL_KEY, value))
+  watch(
+    theme,
+    (value) => {
+      writeStored(THEME_KEY, value)
+      document.documentElement.dataset.theme = value
+    },
+    { immediate: true },
+  )
+  watch(
+    filterRules,
+    (rules) => {
+      if (projectId.value) writeStored(FILTER_KEY + projectId.value, JSON.stringify(rules))
+    },
+    { deep: true },
+  )
+
+  /** Скрытые по атрибутам объекты. Считается заново при правке графа и при смене правил. */
+  const hidden = computed(() => {
+    void rev.value
+    return doc.value && filterRules.value.length > 0 ? markRaw(computeHidden(doc.value, filterRules.value)) : NOTHING_HIDDEN
+  })
+
+  const lines = computed<TransitLine[]>(() => {
+    void rev.value
+    return doc.value && projector.value ? listLines(doc.value, projector.value) : []
+  })
+
+  const selectedLine = computed(() => lines.value.find((line) => line.id === selectedLineId.value) ?? null)
 
   const preset = computed(
     () => ROAD_PRESETS.find((item) => item.id === presetId.value) ?? ROAD_PRESETS[0]!,
@@ -226,6 +298,9 @@ export const useEditor = defineStore('editor', () => {
       drawPoints.value = []
       tool.value = 'select'
       saveState.value = 'saved'
+      selectedLineId.value = null
+      junctionNode.value = null
+      filterRules.value = readFilterRules(project.id)
       rev.value++
       runValidation()
     } catch (error) {
@@ -233,6 +308,88 @@ export const useEditor = defineStore('editor', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  function readFilterRules(id: string): FilterRule[] {
+    try {
+      const parsed = JSON.parse(readStored(FILTER_KEY + id) ?? '[]')
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
+  function selectLine(id: number | null): void {
+    selectedLineId.value = id
+  }
+
+  function focusLine(id: number): void {
+    selectedLineId.value = id
+    const line = lines.value.find((item) => item.id === id)
+    const way = line ? doc.value?.ways.get(line.wayIds[Math.floor(line.wayIds.length / 2)] ?? -1) : undefined
+    const node = way && doc.value?.nodes.get(way.nds[0]!)
+    if (node) focusOn(node, 15.5)
+  }
+
+  function createTransitLine(fields: { ref: string; mode: TransitMode; name?: string; interval?: number }): void {
+    const id = mutate('Новый маршрут', (d) => createLine(d, fields))
+    if (id !== undefined) {
+      selectedLineId.value = id
+      tool.value = 'lineWay'
+      toast('Маршрут создан. Щёлкайте по дорогам по порядку следования', 'success')
+    }
+  }
+
+  function updateLineTags(id: number, tags: Tags, label = 'Атрибуты маршрута'): void {
+    mutate(label, (d) => setLineTags(d, id, tags))
+  }
+
+  function deleteTransitLine(id: number): void {
+    mutate('Удаление маршрута', (d) => deleteLine(d, id))
+    if (selectedLineId.value === id) selectedLineId.value = null
+    if (tool.value === 'lineWay' || tool.value === 'lineStop') tool.value = 'select'
+  }
+
+  function appendWayToLine(wayId: number): void {
+    const id = selectedLineId.value
+    if (id === null) {
+      toast('Сначала выберите маршрут')
+      return
+    }
+    const result = mutate('Дорога маршрута', (d) => addLineWay(d, id, wayId))
+    if (result && !result.connected) toast('Эта дорога не примыкает к концу маршрута: в нём появится разрыв', 'error')
+  }
+
+  function removeWayFromLine(id: number, wayId: number): void {
+    mutate('Дорога маршрута', (d) => removeLineWay(d, id, wayId))
+  }
+
+  function addNodeToLineAsStop(nodeId: number): void {
+    const id = selectedLineId.value
+    if (id === null) {
+      toast('Сначала выберите маршрут')
+      return
+    }
+    mutate('Остановка маршрута', (d, p) => addLineStop(d, p, id, nodeId))
+  }
+
+  function addStopOnWay(wayId: number, position: LatLon): void {
+    const id = selectedLineId.value
+    if (id === null) {
+      toast('Сначала выберите маршрут')
+      return
+    }
+    const relation = doc.value?.relations.get(id)
+    const count = relation && projector.value ? readLine(doc.value!, relation, projector.value).stops.length : 0
+    mutate('Новая остановка', (d, p) => {
+      const nodeId = createStopOnWay(d, p, wayId, position, `Остановка ${count + 1}`)
+      addLineStop(d, p, id, nodeId)
+    })
+    toast('Остановка добавлена', 'success')
+  }
+
+  function removeStopFromLine(id: number, nodeId: number): void {
+    mutate('Остановка маршрута', (d) => removeLineStop(d, id, nodeId))
   }
 
   function setImageUnderlay(url: string): void {
@@ -322,6 +479,12 @@ export const useEditor = defineStore('editor', () => {
   }
 
   /** Выполняет правку одним шагом отмены. Ошибка откатывает всё и показывается пользователю. */
+  /** Редактор узла. На светофоре сразу открываются фазы: за ними туда и идут. */
+  function openJunction(id: number, tab?: 'lanes' | 'signal'): void {
+    junctionTab.value = tab ?? (doc.value?.nodes.get(id)?.tags?.highway === 'traffic_signals' ? 'signal' : 'lanes')
+    junctionNode.value = id
+  }
+
   function mutate<T>(label: string, action: (d: OsmDoc, p: Projector) => T): T | undefined {
     const d = doc.value
     const p = projector.value
@@ -681,6 +844,32 @@ export const useEditor = defineStore('editor', () => {
     preset,
     drawMode,
     drawPoints,
+    theme,
+    activeType,
+    leftTab,
+    listOpen,
+    listTab,
+    junctionNode,
+    junctionTab,
+    openJunction,
+    selectedLineId,
+    selectedLine,
+    lines,
+    cursor,
+    filterRules,
+    rightTab,
+    proposalTargets,
+    hidden,
+    selectLine,
+    focusLine,
+    createTransitLine,
+    updateLineTags,
+    deleteTransitLine,
+    appendWayToLine,
+    removeWayFromLine,
+    addNodeToLineAsStop,
+    addStopOnWay,
+    removeStopFromLine,
     basemap,
     basemapOpacity,
     modelOpacity,
@@ -701,6 +890,7 @@ export const useEditor = defineStore('editor', () => {
     helpOpen,
     exportOpen,
     zoom,
+    fitRev,
     navigatorOpen,
     inspectorOpen,
     network,

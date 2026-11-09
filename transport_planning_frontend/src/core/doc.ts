@@ -163,6 +163,15 @@ export class OsmDoc {
     return this.redoStack.length > 0
   }
 
+  /** Шаг, который отменится следующим. По нему можно узнать, в силе ли ещё конкретная правка. */
+  get lastStep(): object | null {
+    return this.undoStack.at(-1) ?? null
+  }
+
+  isStepApplied(step: object): boolean {
+    return this.undoStack.includes(step as Patch)
+  }
+
   get undoLabel(): string | null {
     return this.undoStack.at(-1)?.label ?? null
   }
