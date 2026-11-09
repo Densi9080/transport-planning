@@ -1,0 +1,10 @@
+.git
+.venv
+.claude
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/dist
+transport_planning/db.sqlite3
+transport_planning/media
+transport_planning/frontend_dist
