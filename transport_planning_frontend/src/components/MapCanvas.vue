@@ -7,6 +7,7 @@ import {
   type MapMouseEvent,
   Marker,
   NavigationControl,
+  ScaleControl,
   setWorkerUrl,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -15,9 +16,11 @@ import type { Feature, FeatureCollection } from 'geojson'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { bearing, dist, nearestOnSegment, offsetPolyline, polylineLength, sub, unit } from '@/core/geo'
+import { hiddenJunctions } from '@/core/filter'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
-import { buildScene, buildStaticScene } from '@/core/scene'
+import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
+import { lineSegments } from '@/core/transit'
 import type { LatLon, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
 import { CarLayer } from '@/map/carLayer'
@@ -29,6 +32,7 @@ import {
   GRAPH_LAYERS,
   MODEL_FILL_LAYERS,
   SIM_LAYERS,
+  themePaint,
   TURN_LAYERS,
 } from '@/map/style'
 import { parseSpeed } from '@/sim/macro'
@@ -41,10 +45,16 @@ import { useSimulation } from '@/stores/simulation'
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+const SIGNAL_PICK_PX = 6
 const SEGMENT_PICK_PX = 7
 const SNAP_PX = 13
 const ANGLE_STEP_DEG = 15
 const MIN_DRAW_STEP_PX = 5
+const BAR_MAX_PX = 34
+const BAR_VEHICLES_PER_PX = 70
+const BAR_LABEL_MIN = 300
+const BAR_LABEL_COUNT = 40
+const OD_LINES = 150
 
 const editor = useEditor()
 const sim = useSimulation()
@@ -105,6 +115,8 @@ function refreshWayCache(): void {
     if (!tags.highway || tags.area === 'yes') continue
     const drivable = isDrivable(tags)
     if (!drivable && !editor.layers.minor) continue
+    // Скрытый объект нельзя случайно выбрать на карте
+    if (editor.hidden.ways.has(way.id)) continue
     const ids = way.nds.filter((id) => doc.nodes.has(id))
     if (ids.length < 2) continue
     wayCache.set(way.id, {
@@ -127,6 +139,8 @@ function metersPerPixel(lngLat: LngLat): number {
 
 function pickableNode(id: number): boolean {
   const doc = editor.doc!
+  if (editor.hidden.nodes.has(id)) return false
+  if (editor.activeType === 'nodes') return true
   if (editor.selection.some((item) => item.kind === 'node' && item.id === id)) return true
   const node = doc.nodes.get(id)
   if (node?.tags?.highway) return true
@@ -166,7 +180,7 @@ function pick(lngLat: LngLat): Hit | null {
       }
     })
   }
-  if (bestHandle) return bestHandle
+  if (bestHandle && editor.activeType !== 'links') return bestHandle
 
   let nodeHit: HitNode | null = null
   let nodeDistance = NODE_PICK_PX * mpp
@@ -182,7 +196,8 @@ function pick(lngLat: LngLat): Hit | null {
       }
     })
   }
-  if (nodeHit) return nodeHit
+  if (nodeHit && editor.activeType !== 'links') return nodeHit
+  if (editor.activeType === 'nodes') return null
 
   let wayHit: HitWay | null = null
   let score = Number.POSITIVE_INFINITY
@@ -263,9 +278,126 @@ function renderScene(): void {
   const { scene } = buildScene(editor.doc, editor.projector)
   for (const feature of scene.labels.features) {
     const name = feature.properties?.name as string
-    feature.properties = { ...feature.properties, image: ensureLabelImage(map, name) }
+    feature.properties = { ...feature.properties, image: ensureLabelImage(map, name, editor.theme) }
   }
-  for (const [key, value] of Object.entries(scene)) setData(key, value)
+  const hidden = editor.hidden
+  const anyHidden = hidden.ways.size > 0 || hidden.nodes.size > 0
+  const network = editor.network
+  const junctions = anyHidden && network ? hiddenJunctions(network, hidden) : null
+  for (const [key, value] of Object.entries(scene)) {
+    setData(key, anyHidden ? filterCollection(value, junctions) : value)
+  }
+}
+
+/** Убирает скрытые по атрибутам объекты. Сам граф при этом остаётся целым: геометрия узлов не меняется. */
+function filterCollection(collection: FeatureCollection, junctions: Set<number> | null): FeatureCollection {
+  const { ways, nodes } = editor.hidden
+  return {
+    type: 'FeatureCollection',
+    features: collection.features.filter((feature) => {
+      const props = feature.properties
+      if (!props) return true
+      if (props.wayId !== undefined && ways.has(props.wayId as number)) return false
+      if (props.node !== undefined) {
+        if (nodes.has(props.node as number)) return false
+        if (junctions?.has(props.node as number)) return false
+      }
+      return true
+    }),
+  }
+}
+
+let backdrop: StaticScene | null = null
+
+function applyStatic(): void {
+  if (!ready || !backdrop) return
+  for (const key of ['buildings', 'landuse', 'rail', 'water', 'other', 'points'] as const) {
+    setData(key, filterCollection(backdrop[key], null))
+  }
+}
+
+function applyTheme(): void {
+  if (!ready || !map) return
+  for (const [layer, property, value] of themePaint(editor.theme)) {
+    if (map.getLayer(layer)) map.setPaintProperty(layer, property as never, value as never)
+  }
+  applyModelOpacity()
+  scheduleRender()
+  renderTransit()
+}
+
+/** Маршруты ОТ: толщина линии показывает, сколько маршрутов идёт по этой дороге. */
+function renderTransit(): void {
+  const doc = editor.doc
+  if (!ready || !map || !doc) return
+  const showAll = editor.layers.transit
+  const selectedId = editor.selectedLineId
+  const lines = editor.lines
+  const counts = new Map<string, number>()
+  const segmentsByLine = new Map<number, number[][]>()
+  for (const line of lines) {
+    if (!showAll && line.id !== selectedId) continue
+    const segments = lineSegments(doc, line.wayIds)
+    segmentsByLine.set(line.id, segments)
+    for (const segment of segments) {
+      for (let i = 1; i < segment.length; i++) {
+        const key = segmentKey(segment[i - 1]!, segment[i]!)
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+    }
+  }
+  const features: Feature[] = []
+  const stopFeatures: Feature[] = []
+  const labelFeatures: Feature[] = []
+  const seenStops = new Set<number>()
+  for (const line of lines) {
+    const segments = segmentsByLine.get(line.id)
+    if (!segments) continue
+    const selected = line.id === selectedId
+    for (const segment of segments) {
+      const coordinates = segment
+        .map((id) => doc.nodes.get(id))
+        .filter((node): node is NonNullable<typeof node> => !!node)
+        .map((node) => [node.lon, node.lat])
+      if (coordinates.length < 2) continue
+      let count = 1
+      for (let i = 1; i < segment.length; i++) {
+        count = Math.max(count, counts.get(segmentKey(segment[i - 1]!, segment[i]!)) ?? 1)
+      }
+      features.push({
+        type: 'Feature',
+        properties: { line: line.id, selected, color: line.color, count },
+        geometry: { type: 'LineString', coordinates },
+      })
+    }
+    for (const stop of line.stops) {
+      if (!selected && seenStops.has(stop.node)) continue
+      seenStops.add(stop.node)
+      stopFeatures.push({
+        type: 'Feature',
+        properties: { selected, color: line.color },
+        geometry: { type: 'Point', coordinates: [stop.position.lon, stop.position.lat] },
+      })
+      if (selected) {
+        labelFeatures.push({
+          type: 'Feature',
+          properties: { image: ensureLabelImage(map, stop.name, editor.theme) },
+          geometry: { type: 'Point', coordinates: [stop.position.lon, stop.position.lat] },
+        })
+      }
+    }
+  }
+  // Выбранный маршрут рисуется поверх остальных
+  features.sort((a, b) => Number(a.properties?.selected) - Number(b.properties?.selected))
+  setData('transitLines', { type: 'FeatureCollection', features })
+  setData('transitStops', { type: 'FeatureCollection', features: stopFeatures })
+  setData('transitLabels', { type: 'FeatureCollection', features: labelFeatures })
+  map.setLayoutProperty('transit-all', 'visibility', showAll ? 'visible' : 'none')
+  map.setLayoutProperty('transit-stops', 'visibility', showAll || selectedId !== null ? 'visible' : 'none')
+}
+
+function segmentKey(a: number, b: number): string {
+  return a < b ? `${a}:${b}` : `${b}:${a}`
 }
 
 function renderIssues(): void {
@@ -326,6 +458,20 @@ function renderOverlay(): void {
     })
   }
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
+
+  // Предложения помощника видны на карте, пока человек не решил, применять ли их
+  const proposal = editor.proposalTargets
+  if (proposal) {
+    for (const id of proposal.ways) {
+      const way = doc.ways.get(id)
+      const points = way?.nds.map((nd) => doc.nodes.get(nd)).filter((node): node is NonNullable<typeof node> => !!node).map((node) => projector.toXY(node))
+      if (points && points.length >= 2) features.push(lineOf(points, { role: 'proposal' }))
+    }
+    for (const id of proposal.nodes) {
+      const node = doc.nodes.get(id)
+      if (node) features.push(pointOf(node, { role: 'proposal-node' }))
+    }
+  }
 
   const snap = drag?.snap ?? cursorSnap
   if (snap) features.push(pointOf(snap.position, { role: 'snap' }))
@@ -411,6 +557,8 @@ function onMouseMove(event: MapMouseEvent): void {
     scheduleRender()
     return
   }
+
+  editor.cursor = { lat: event.lngLat.lat, lon: event.lngLat.lng }
 
   if (editor.tool === 'road') {
     cursorSnap = original.altKey ? null : findSnap(event.lngLat, null, true)
@@ -503,6 +651,16 @@ function onMouseUp(): void {
 function onClick(event: MapMouseEvent): void {
   if (suppressClick) return
   const original = event.originalEvent
+  // Сигнал в симуляции стоит на стоп-линии, а не в узле: щелчок по нему выбирает весь светофор
+  if (editor.viewMode === 'sim' && map?.getLayer('sim-signals')) {
+    const { x, y } = event.point
+    const signal = map.queryRenderedFeatures([[x - SIGNAL_PICK_PX, y - SIGNAL_PICK_PX], [x + SIGNAL_PICK_PX, y + SIGNAL_PICK_PX]], { layers: ['sim-signals'] })[0]
+    const node = signal?.properties?.node as number | undefined
+    if (node !== undefined) {
+      editor.selectOne({ kind: 'node', id: node })
+      return
+    }
+  }
   const position = { lat: event.lngLat.lat, lon: event.lngLat.lng }
   const hit = pick(event.lngLat)
 
@@ -540,6 +698,13 @@ function onClick(event: MapMouseEvent): void {
     case 'tunnel':
       if (hit?.kind === 'way') editor.toggleWayStructure(hit.id, editor.tool)
       break
+    case 'lineWay':
+      if (hit?.kind === 'way') editor.appendWayToLine(hit.id)
+      break
+    case 'lineStop':
+      if (hit?.kind === 'node') editor.addNodeToLineAsStop(hit.id)
+      else if (hit?.kind === 'way') editor.addStopOnWay(hit.id, editor.projector!.toLatLon(hit.point))
+      break
   }
 }
 
@@ -564,6 +729,15 @@ function onDoubleClick(event: MapMouseEvent): void {
     event.preventDefault()
     editor.finishRoad()
     scheduleOverlay()
+    return
+  }
+  // Двойной щелчок по узлу открывает редактор узла
+  if (editor.tool === 'select') {
+    const hit = pick(event.lngLat)
+    if (hit?.kind === 'node' && editor.doc!.waysOfNode(hit.id).length >= 2) {
+      event.preventDefault()
+      editor.openJunction(hit.id)
+    }
   }
 }
 
@@ -581,16 +755,21 @@ function applyView(): void {
   visible(GRAPH_LAYERS, mode === 'graph')
   // В симуляции траектории поворотов только мешали бы видеть машины и пробки
   visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths)
-  visible(SIM_LAYERS, isSim)
-  m.setLayoutProperty('sim-load', 'visibility', isSim && sim.showLoad ? 'visible' : 'none')
-  m.setLayoutProperty('sim-jams', 'visibility', isSim && sim.level === 'micro' ? 'visible' : 'none')
-  m.setLayoutProperty('sim-signals', 'visibility', isSim && sim.level === 'micro' ? 'visible' : 'none')
+  visible(SIM_LAYERS, false)
+  const macro = isSim && sim.level === 'macro'
+  const micro = isSim && sim.level === 'micro'
+  visible(['sim-load'], isSim && sim.showLoad && (micro || sim.macroView === 'fill'))
+  visible(['sim-bars', 'sim-bar-labels'], macro && sim.macroView === 'bars')
+  visible(['sim-od', 'sim-zones'], macro && sim.showDesire)
+  visible(['sim-jams', 'sim-signals'], micro)
   visible(['arrows'], lane && editor.layers.arrows)
   visible(['crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
   visible(['labels'], lane && editor.layers.labels)
   visible(['minor'], editor.layers.minor)
   visible(['rail'], editor.layers.rail)
+  visible(['other'], editor.layers.other)
+  visible(['points'], editor.layers.points)
   visible(['landuse', 'water-fill', 'water-line'], editor.layers.landuse)
   visible(['buildings'], editor.layers.buildings && !threeD)
   visible(['buildings-3d'], editor.layers.buildings && threeD)
@@ -705,7 +884,63 @@ function applySimNet(): void {
     })
   }
   setData('simLoad', { type: 'FeatureCollection', features })
+  const bars: Feature[] = []
+  for (const edge of net.edges) {
+    const lane = edge.lanes[Math.floor(edge.lanes.length / 2)]
+    if (!lane) continue
+    bars.push({
+      type: 'Feature',
+      properties: { id: edge.id, wayId: edge.wayId },
+      geometry: { type: 'LineString', coordinates: lane.points.map((point) => projector.toLngLat(point)) },
+    })
+  }
+  setData('simBars', { type: 'FeatureCollection', features: bars })
   applyLoadColors()
+}
+
+/** Подписи объёмов и линии желания: как столбики в Visum, только на самых нагруженных участках. */
+function applyMacroOverlays(): void {
+  const macro = sim.macro
+  const projector = editor.projector
+  if (!ready || !map || !macro || !projector) return
+  const top = [...macro.loads.values()]
+    .filter((load) => load.volume + load.transitPcu >= BAR_LABEL_MIN)
+    .sort((a, b) => b.volume + b.transitPcu - a.volume - a.transitPcu)
+    .slice(0, BAR_LABEL_COUNT)
+  setData('simBarLabels', {
+    type: 'FeatureCollection',
+    features: top.map((load) => {
+      const lane = load.edge.lanes[0]!
+      const middle = lane.points[Math.floor(lane.points.length / 2)]!
+      const value = Math.round((load.volume + load.transitPcu) / 10) * 10
+      return {
+        type: 'Feature',
+        properties: { image: ensureLabelImage(map!, String(value), editor.theme) },
+        geometry: { type: 'Point', coordinates: projector.toLngLat(middle) },
+      }
+    }),
+  })
+  const flows = [...macro.flows].sort((a, b) => b.trips - a.trips).slice(0, OD_LINES)
+  const biggest = flows[0]?.trips ?? 1
+  setData('simOd', {
+    type: 'FeatureCollection',
+    features: flows.map((flow) => ({
+      type: 'Feature',
+      properties: { width: 0.6 + (flow.trips / biggest) * 8 },
+      geometry: {
+        type: 'LineString',
+        coordinates: [projector.toLngLat(flow.from.position), projector.toLngLat(flow.to.position)],
+      },
+    })),
+  })
+  setData('simZones', {
+    type: 'FeatureCollection',
+    features: macro.zones.map((zone) => ({
+      type: 'Feature',
+      properties: { kind: zone.kind, radius: 3 + Math.sqrt(zone.production + zone.attraction) / 5 },
+      geometry: { type: 'Point', coordinates: projector.toLngLat(zone.position) },
+    })),
+  })
 }
 
 function applyLoadColors(): void {
@@ -719,7 +954,15 @@ function applyLoadColors(): void {
     for (const edge of net.edges) {
       const load = loads.get(edge)
       m.setFeatureState({ source: 'simLoad', id: edge.id }, { los: load ? load.los : -1 })
+      if (m.getSource('simBars')) {
+        const total = load ? load.volume + load.transitPcu : 0
+        m.setFeatureState(
+          { source: 'simBars', id: edge.id },
+          { los: load ? load.los : -1, w: Math.min(BAR_MAX_PX, total / BAR_VEHICLES_PER_PX) },
+        )
+      }
     }
+    applyMacroOverlays()
   } else {
     for (const edge of net.edges) {
       const hasTraffic = edge.carCount > 0 || edge.speedRatio < 0.95
@@ -751,7 +994,7 @@ function applySignals(time: number): void {
     for (const stop of group.stops) {
       features.push({
         type: 'Feature',
-        properties: { state: signalState(group, stop.connector.phase, time) },
+        properties: { state: signalState(stop.connector, time), node: group.owner },
         geometry: { type: 'Point', coordinates: projector.toLngLat(stop) },
       })
     }
@@ -770,7 +1013,7 @@ function simLoop(now: number): void {
   sim.frame(seconds)
   carLayer.cars = micro.cars
   carLayer.alpha = sim.alpha
-  carLayer.colorBySpeed = sim.colorBySpeed
+  carLayer.colorMode = sim.colorMode
   if (sim.running) {
     map.triggerRepaint()
     if (now - lastSignalsAt > 400) {
@@ -820,13 +1063,14 @@ onMounted(() => {
     style: {
       version: 8,
       sources: emptySources(),
-      layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#141518' } }],
+      layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#f4f3ee' } }],
     },
   })
   map = instance
   if (import.meta.env.DEV) (window as unknown as { __map: MlMap }).__map = instance
   instance.doubleClickZoom.disable()
-  instance.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right')
+  instance.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
+  instance.addControl(new ScaleControl({ unit: 'metric', maxWidth: 140 }), 'bottom-left')
 
   instance.on('load', () => {
     registerIcons(instance)
@@ -838,15 +1082,14 @@ onMounted(() => {
       return edge ? parseSpeed(edge.tags.maxspeed, edge.tags.highway ?? 'road') / 3.6 : 14
     }
     instance.addLayer(carLayer, 'buildings-3d')
-    const backdrop = buildStaticScene(doc)
-    setData('buildings', backdrop.buildings)
-    setData('landuse', backdrop.landuse)
-    setData('rail', backdrop.rail)
-    setData('water', backdrop.water)
+    backdrop = buildStaticScene(doc)
+    applyStatic()
     applyView()
+    applyTheme()
     applyBasemap()
     fitToBounds()
     renderScene()
+    renderTransit()
     renderIssues()
     renderOverlay()
     publishCamera()
@@ -892,8 +1135,20 @@ onBeforeUnmount(() => {
   ready = false
 })
 
-watch(() => editor.rev, scheduleRender)
+watch(() => editor.rev, () => {
+  scheduleRender()
+  renderTransit()
+})
+watch(() => editor.theme, applyTheme)
+watch(() => editor.fitRev, fitToBounds)
+watch(() => editor.hidden, () => {
+  wayCacheRev = -1
+  applyStatic()
+  scheduleRender()
+})
+watch(() => [editor.selectedLineId, editor.layers.transit], renderTransit)
 watch(() => editor.selection, scheduleOverlay)
+watch(() => editor.proposalTargets, scheduleOverlay)
 watch(() => [editor.issues, editor.focusedIssue], renderIssues)
 watch(() => editor.drawPoints, scheduleOverlay)
 watch(() => ({ ...editor.layers }), applyView)
@@ -925,7 +1180,7 @@ watch(() => sim.loadRev, () => {
   applyLoadColors()
   applyJams()
 })
-watch(() => [sim.level, sim.showLoad], () => {
+watch(() => [sim.level, sim.showLoad, sim.macroView, sim.showDesire], () => {
   applyView()
   applyLoadColors()
   applyJams()
@@ -976,9 +1231,9 @@ defineExpose({ fitToBounds })
   transform: translate(-50%, -50%);
   padding: 2px 7px;
   border-radius: 5px;
-  background: rgba(20, 21, 24, 0.9);
-  border: 1px solid rgba(244, 63, 94, 0.55);
-  color: #fecdd3;
+  background: var(--panel-solid);
+  border: 1px solid var(--accent);
+  color: var(--text);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;

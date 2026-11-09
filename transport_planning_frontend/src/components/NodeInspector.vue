@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Footprints, Scissors, TrafficCone, Trash2, Unlink } from 'lucide-vue-next'
+import { Footprints, Route, Scissors, TrafficCone, Trash2, Unlink } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { bearing } from '@/core/geo'
@@ -8,6 +8,7 @@ import { type Arm, junctionMovements, type Movement } from '@/core/topology'
 import type { ONode, Tags } from '@/core/types'
 import { useEditor } from '@/stores/editor'
 
+import SignalSummary from './SignalSummary.vue'
 import TagTable from './TagTable.vue'
 
 const props = defineProps<{ node: ONode }>()
@@ -90,6 +91,9 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
   </div>
 
   <div class="section">
+    <button class="btn primary block" :disabled="wayIds.length < 2" @click="editor.openJunction(node.id)">
+      <Route :size="13" aria-hidden="true" /> Редактор узла: полосы и фазы <kbd>E</kbd>
+    </button>
     <div class="grid-2">
       <button class="btn small" :class="{ on: isSignal }" :aria-pressed="isSignal" @click="editor.toggleOnNode('signal', { nodeId: node.id, position: node })">
         <TrafficCone :size="13" aria-hidden="true" /> Светофор
@@ -108,6 +112,8 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
       <Trash2 :size="13" aria-hidden="true" /> Удалить узел
     </button>
   </div>
+
+  <SignalSummary v-if="isSignal" :node="node.id" />
 
   <div v-if="groups.length" class="section">
     <div class="eyebrow">Разрешённые манёвры</div>

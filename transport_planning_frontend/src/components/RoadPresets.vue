@@ -88,7 +88,7 @@ h2 {
   flex-direction: column;
   gap: 2px;
   padding: 8px;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--inset);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   font-size: 11px;
@@ -113,7 +113,7 @@ h2 {
   height: 22px;
   margin-bottom: 4px;
   padding: 2px 8px;
-  background: #101114;
+  background: var(--strip);
   border-radius: 4px;
 }
 .cut i {

@@ -377,7 +377,7 @@ function wayBetween(doc: OsmDoc, via: number, neighbor: number): number | null {
 }
 
 /** Участник запрета по правилам OSM должен начинаться или заканчиваться в узле via. */
-function ensureEndsAtVia(doc: OsmDoc, via: number, neighbor: number): number {
+export function ensureEndsAtVia(doc: OsmDoc, via: number, neighbor: number): number {
   const wayId = wayBetween(doc, via, neighbor)
   if (wayId === null) throw new Error('Подход к перекрёстку не найден')
   splitWay(doc, wayId, via)

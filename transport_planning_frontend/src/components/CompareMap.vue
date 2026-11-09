@@ -63,6 +63,7 @@ onMounted(() => {
       version: 8,
       sources: { axes: { type: 'geojson', data: axes() } },
       layers: [
+        // Здесь нужен настоящий цвет: стиль карты не понимает переменные CSS
         { id: 'compare-bg', type: 'background', paint: { 'background-color': '#101114' } },
         { id: 'compare-axes', type: 'line', source: 'axes', paint: { 'line-color': '#fb7185', 'line-width': 1.2, 'line-opacity': 0.85 } },
       ],
@@ -125,12 +126,12 @@ watch(() => editor.rev, () => {
 }
 .title {
   position: absolute;
-  top: 58px;
+  top: 8px;
   left: 8px;
-  padding: 2px 8px;
-  background: rgba(20, 21, 24, 0.85);
-  border-radius: 5px;
-  font-size: 12px;
+  padding: 1px 7px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  font-size: 11px;
   pointer-events: none;
 }
 </style>

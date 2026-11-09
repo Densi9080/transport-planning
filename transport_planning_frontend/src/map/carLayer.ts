@@ -186,6 +186,12 @@ interface MeshBuffers {
   data: Float32Array
 }
 
+const STYLE_TINTS = {
+  calm: [0.29, 0.64, 0.78],
+  normal: [0.62, 0.64, 0.68],
+  aggressive: [0.86, 0.2, 0.18],
+} as const
+
 /** Цвет машины по доле от разрешённой скорости: красный значит, что машина стоит. */
 function speedColor(ratio: number, out: number[]): void {
   const t = Math.min(1, Math.max(0, ratio))
@@ -209,7 +215,7 @@ export class CarLayer implements CustomLayerInterface {
 
   cars: Car[] = []
   alpha = 1
-  colorBySpeed = false
+  colorMode: 'fleet' | 'speed' | 'style' = 'fleet'
   limitOf: (car: Car) => number = () => 14
 
   private map: MlMap | null = null
@@ -311,11 +317,16 @@ export class CarLayer implements CustomLayerInterface {
       data[i++] = car.length
       data[i++] = car.width
       data[i++] = car.height
-      if (this.colorBySpeed) {
+      if (this.colorMode === 'speed') {
         speedColor(car.v / this.limitOf(car), this.tint)
         data[i++] = this.tint[0]!
         data[i++] = this.tint[1]!
         data[i++] = this.tint[2]!
+      } else if (this.colorMode === 'style' && car.lineId === null) {
+        const tint = STYLE_TINTS[car.style]
+        data[i++] = tint[0]
+        data[i++] = tint[1]
+        data[i++] = tint[2]
       } else {
         data[i++] = car.color[0]
         data[i++] = car.color[1]

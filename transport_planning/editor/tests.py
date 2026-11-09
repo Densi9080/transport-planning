@@ -1,6 +1,11 @@
+import json
+import os
 import shutil
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from django.conf import settings
@@ -194,3 +199,208 @@ class ApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn('2', response.json()['detail'])
+
+
+class FakeModelServer:
+    """Настоящий HTTP-сервер вместо модели: проверяем всё, что реально уходит по сети."""
+
+    def __enter__(self):
+        outer = self
+        self.requests = []
+        self.status = 200
+        self.reply = {
+            'choices': [{'message': {'role': 'assistant', 'content': 'Привет'}, 'finish_reason': 'stop'}],
+            'usage': {'total_tokens': 5},
+        }
+        self.redirect_hit = False
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, status, body, headers=None):
+                data = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(status)
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _record(self, body):
+                outer.requests.append({
+                    'path': self.path,
+                    'auth': self.headers.get('Authorization'),
+                    'body': body,
+                })
+
+            def do_GET(self):
+                self._record(None)
+                if self.path == '/secret-target/models':
+                    outer.redirect_hit = True
+                self._send(outer.status, {'data': [{'id': 'model-b'}, {'id': 'model-a'}]})
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', 0))
+                self._record(json.loads(self.rfile.read(length)))
+                if outer.status == 302:
+                    self._send(302, b'', {'Location': f'http://127.0.0.1:{outer.port}/secret-target/models'})
+                    return
+                self._send(outer.status, outer.reply)
+
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.url = f'http://127.0.0.1:{self.port}/v1'
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+def post_json(client, url, body):
+    return client.post(url, body, content_type='application/json')
+
+
+class AssistantTests(TestCase):
+    def setUp(self):
+        patcher = patch.dict('os.environ')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ('LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY', 'LLM_SETTINGS_LOCKED'):
+            os.environ.pop(name, None)
+
+    def configure(self, url, key='secret-key-123', model='test-model'):
+        response = self.client.put(
+            '/api/assistant/settings/',
+            {'baseUrl': url, 'model': model, 'apiKey': key},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200)
+        return response
+
+    def test_key_never_reaches_the_browser(self):
+        response = self.configure('http://localhost:11434/v1')
+        self.assertTrue(response.json()['hasKey'])
+        self.assertNotIn('secret-key-123', response.content.decode())
+        self.assertNotIn('secret-key-123', self.client.get('/api/assistant/settings/').content.decode())
+
+    def test_empty_key_keeps_previous_and_clear_removes_it(self):
+        self.configure('http://localhost:1/v1')
+        self.client.put('/api/assistant/settings/', {'apiKey': ''}, content_type='application/json')
+        self.assertTrue(self.client.get('/api/assistant/settings/').json()['hasKey'])
+        self.client.put('/api/assistant/settings/', {'clearKey': True}, content_type='application/json')
+        self.assertFalse(self.client.get('/api/assistant/settings/').json()['hasKey'])
+
+    def test_local_server_works_without_key(self):
+        with FakeModelServer() as server:
+            self.client.put(
+                '/api/assistant/settings/',
+                {'baseUrl': server.url, 'model': 'llama'},
+                content_type='application/json',
+            )
+            response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'Привет'}]})
+            self.assertEqual(response.status_code, 200)
+            self.assertIsNone(server.requests[0]['auth'])
+
+    def test_url_is_normalized(self):
+        response = self.configure('http://localhost:11434/v1/chat/completions/')
+        self.assertEqual(response.json()['baseUrl'], 'http://localhost:11434/v1')
+
+    def test_rejects_non_http_url(self):
+        for bad in ('file:///etc/passwd', 'ftp://x/y', 'просто текст'):
+            response = self.client.put('/api/assistant/settings/', {'baseUrl': bad}, content_type='application/json')
+            self.assertEqual(response.status_code, 400, bad)
+
+    def test_chat_goes_to_configured_address_with_key_and_tools(self):
+        with FakeModelServer() as server:
+            self.configure(server.url)
+            tools = [{'type': 'function', 'function': {'name': 'x', 'parameters': {'type': 'object', 'properties': {}}}}]
+            response = post_json(
+                self.client,
+                '/api/assistant/chat/',
+                {'messages': [{'role': 'user', 'content': 'Привет'}], 'tools': tools, 'model': 'подмена'},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['message']['content'], 'Привет')
+            sent = server.requests[0]
+            self.assertEqual(sent['path'], '/v1/chat/completions')
+            self.assertEqual(sent['auth'], 'Bearer secret-key-123')
+            # Модель задаёт сервер: браузер не может её подменить
+            self.assertEqual(sent['body']['model'], 'test-model')
+            self.assertEqual(sent['body']['tools'], tools)
+
+    def test_passes_tool_calls_back(self):
+        with FakeModelServer() as server:
+            self.configure(server.url)
+            calls = [{'id': 'c1', 'type': 'function', 'function': {'name': 'find_roads', 'arguments': '{}'}}]
+            server.reply = {'choices': [{'message': {'role': 'assistant', 'content': None, 'tool_calls': calls}}]}
+            data = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]}).json()
+            self.assertEqual(data['message']['tool_calls'], calls)
+            self.assertEqual(data['message']['content'], '')
+
+    def test_lists_models_for_unsaved_form_values(self):
+        with FakeModelServer() as server:
+            response = post_json(self.client, '/api/assistant/test/', {'baseUrl': server.url, 'apiKey': 'typed-key'})
+            self.assertEqual(response.json()['models'], ['model-a', 'model-b'])
+            self.assertEqual(server.requests[0]['auth'], 'Bearer typed-key')
+
+    def test_clear_errors_without_leaking_key(self):
+        with FakeModelServer() as server:
+            self.configure(server.url)
+            server.status = 401
+            server.reply = {'error': {'message': 'Incorrect key secret-key-123 provided'}}
+            response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]})
+            self.assertEqual(response.status_code, 502)
+            self.assertIn('отклонил ключ', response.json()['detail'])
+            self.assertNotIn('secret-key-123', response.json()['detail'])
+
+    def test_explains_model_without_tool_support(self):
+        with FakeModelServer() as server:
+            self.configure(server.url)
+            server.status = 400
+            server.reply = {'error': {'message': 'model does not support tools'}}
+            response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]})
+            self.assertIn('не поддерживает вызов функций', response.json()['detail'])
+
+    def test_unreachable_server_gives_clear_error(self):
+        self.configure('http://127.0.0.1:9/v1')
+        response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('Не удалось подключиться', response.json()['detail'])
+
+    def test_redirect_does_not_carry_the_key_away(self):
+        with FakeModelServer() as server:
+            self.configure(server.url)
+            server.status = 302
+            response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]})
+            self.assertEqual(response.status_code, 502)
+            self.assertFalse(server.redirect_hit)
+
+    def test_not_configured(self):
+        response = post_json(self.client, '/api/assistant/chat/', {'messages': [{'role': 'user', 'content': 'х'}]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('не настроен', response.json()['detail'])
+
+    def test_rejects_bad_history(self):
+        self.configure('http://127.0.0.1:9/v1')
+        for bad in ({'messages': []}, {'messages': 'текст'}, {}):
+            self.assertEqual(post_json(self.client, '/api/assistant/chat/', bad).status_code, 400)
+
+    def test_environment_configuration_and_lock(self):
+        with patch.dict('os.environ', {
+            'LLM_BASE_URL': 'http://env-host/v1',
+            'LLM_MODEL': 'env-model',
+            'LLM_API_KEY': 'env-key',
+            'LLM_SETTINGS_LOCKED': '1',
+        }):
+            data = self.client.get('/api/assistant/settings/').json()
+            self.assertEqual(data['baseUrl'], 'http://env-host/v1')
+            self.assertTrue(data['locked'])
+            self.assertTrue(data['hasKey'])
+            self.assertNotIn('env-key', json.dumps(data))
+            response = self.client.put('/api/assistant/settings/', {'baseUrl': 'http://evil/v1'}, content_type='application/json')
+            self.assertEqual(response.status_code, 403)

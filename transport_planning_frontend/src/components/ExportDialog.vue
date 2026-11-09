@@ -251,11 +251,11 @@ h2 {
   margin-top: 2px;
 }
 .status.bad {
-  background: rgba(245, 158, 11, 0.1);
+  background: var(--warn-bg);
   border: 1px solid rgba(245, 158, 11, 0.35);
 }
 .status.good {
-  background: rgba(34, 197, 94, 0.1);
+  background: var(--ok-bg);
   border: 1px solid rgba(34, 197, 94, 0.35);
 }
 .preflight {
@@ -267,11 +267,11 @@ h2 {
   margin: 0;
 }
 .result.ok {
-  color: #86efac;
+  color: var(--ok-text);
 }
 .result.fail,
 li.fail {
-  color: #fca5a5;
+  color: var(--err-text);
 }
 .log {
   max-height: 160px;
@@ -282,7 +282,7 @@ li.fail {
 }
 .error {
   margin: 0;
-  color: #fca5a5;
+  color: var(--err-text);
 }
 .actions {
   display: flex;

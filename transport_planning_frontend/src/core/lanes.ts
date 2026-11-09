@@ -12,6 +12,9 @@ export interface LaneProfile {
   /** Манёвры полос слева направо по ходу движения; null, если не заданы. */
   turnsForward: string[] | null
   turnsBackward: string[] | null
+  /** Разрешения перестроения по тегу change:lanes: значение на каждую полосу. */
+  changeForward: string[] | null
+  changeBackward: string[] | null
   /** Число полос не задано в файле и взято по умолчанию для типа дороги. */
   inferred: boolean
 }
@@ -134,7 +137,71 @@ export function parseProfile(tags: Tags): LaneProfile {
   }
   if (oneway && reversed && !turnsBackward) turnsBackward = turnsForward
 
-  return { forward, backward, oneway, laneWidth, turnsForward, turnsBackward, inferred }
+  const allChanges = parseTurnLanes(tags['change:lanes'])
+  let changeForward = parseTurnLanes(tags['change:lanes:forward'])
+  let changeBackward = parseTurnLanes(tags['change:lanes:backward'])
+  if (allChanges) {
+    if (oneway && reversed) changeBackward = allChanges
+    else if (oneway) changeForward = allChanges
+    else {
+      changeForward ??= allChanges
+      changeBackward ??= allChanges
+    }
+  }
+
+  return { forward, backward, oneway, laneWidth, turnsForward, turnsBackward, changeForward, changeBackward, inferred }
+}
+
+/** Как можно пересекать линию между соседними полосами: от левой к правой и обратно. */
+export type DividerMode = 'both' | 'none' | 'to_right' | 'to_left'
+
+function mayCross(rule: string | undefined, toLeft: boolean): boolean {
+  if (rule === 'no') return false
+  return rule !== (toLeft ? 'not_left' : 'not_right')
+}
+
+/** Можно ли перестроиться между соседними полосами. Полосы нумеруются слева по ходу движения. */
+export function canChangeLane(rules: string[] | null, from: number, to: number): boolean {
+  if (!rules || Math.abs(from - to) !== 1) return true
+  return mayCross(rules[from], to < from)
+}
+
+export function dividerMode(rules: string[] | null, boundary: number): DividerMode {
+  const toRight = canChangeLane(rules, boundary, boundary + 1)
+  const toLeft = canChangeLane(rules, boundary + 1, boundary)
+  if (toRight && toLeft) return 'both'
+  if (toRight) return 'to_right'
+  return toLeft ? 'to_left' : 'none'
+}
+
+function ruleValue(left: boolean, right: boolean): string {
+  if (left && right) return 'yes'
+  if (left) return 'not_right'
+  return right ? 'not_left' : 'no'
+}
+
+/** Записывает тип линии между полосами boundary и boundary + 1 в тег change:lanes. */
+export function withDivider(tags: Tags, direction: TravelDirection, boundary: number, mode: DividerMode): Tags {
+  const profile = parseProfile(tags)
+  const count = direction === 'forward' ? profile.forward : profile.backward
+  const rules = direction === 'forward' ? profile.changeForward : profile.changeBackward
+  const allowed = Array.from({ length: count }, (_, lane) => ({
+    left: canChangeLane(rules, lane, lane - 1),
+    right: canChangeLane(rules, lane, lane + 1),
+  }))
+  const upper = allowed[boundary]
+  const lower = allowed[boundary + 1]
+  if (!upper || !lower) return tags
+  upper.right = mode === 'both' || mode === 'to_right'
+  lower.left = mode === 'both' || mode === 'to_left'
+
+  const next: Tags = { ...tags }
+  const values = allowed.map((lane) => ruleValue(lane.left, lane.right))
+  const key = profile.oneway ? 'change:lanes' : `change:lanes:${direction}`
+  if (profile.oneway) delete next['change:lanes:forward']
+  if (values.every((value) => value === 'yes')) delete next[key]
+  else next[key] = values.join('|')
+  return next
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -178,14 +245,26 @@ export function withLanes(tags: Tags, forward: number, backward: number): Tags {
     next.lanes = String(Math.max(1, lanes))
     fitTurns(next, 'turn:lanes', Math.max(1, lanes))
     fitTurns(next, 'turn:lanes:forward', Math.max(1, lanes))
+    fitChanges(next, 'change:lanes', Math.max(1, lanes))
   } else {
     next.lanes = String(forward + backward)
     next['lanes:forward'] = String(forward)
     next['lanes:backward'] = String(backward)
     fitTurns(next, 'turn:lanes:forward', forward)
     fitTurns(next, 'turn:lanes:backward', backward)
+    fitChanges(next, 'change:lanes:forward', forward)
+    fitChanges(next, 'change:lanes:backward', backward)
   }
   return next
+}
+
+function fitChanges(tags: Tags, key: string, count: number): void {
+  const rules = parseTurnLanes(tags[key])
+  if (!rules) return
+  const fitted = rules.slice(0, count)
+  while (fitted.length < count) fitted.push('yes')
+  if (fitted.every((value) => value === 'yes') || count <= 0) delete tags[key]
+  else tags[key] = fitted.join('|')
 }
 
 function fitTurns(tags: Tags, key: string, count: number): void {

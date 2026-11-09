@@ -108,9 +108,7 @@ function formatDate(value: string): string {
   display: grid;
   place-items: center;
   padding: 24px 16px;
-  background:
-    radial-gradient(1000px 500px at 50% -10%, rgba(244, 63, 94, 0.09), transparent),
-    var(--bg);
+  background: var(--bg);
 }
 .start-card {
   width: min(520px, 100%);
@@ -118,9 +116,8 @@ function formatDate(value: string): string {
   flex-direction: column;
   gap: 14px;
   padding: 24px;
-  background: var(--panel-solid);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
 }
 header {
   display: flex;
@@ -146,9 +143,8 @@ header p {
   align-items: center;
   gap: 6px;
   padding: 28px 16px;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--raised);
   border: 1.5px dashed var(--line-strong);
-  border-radius: var(--radius);
   color: var(--muted);
 }
 .drop strong {
@@ -163,10 +159,10 @@ header p {
 .error {
   margin: 0;
   padding: 8px 10px;
-  background: rgba(239, 68, 68, 0.14);
+  background: var(--err-bg);
   border: 1px solid rgba(239, 68, 68, 0.4);
   border-radius: var(--radius-sm);
-  color: #fecaca;
+  color: var(--err-text);
 }
 .recent {
   display: flex;

@@ -333,7 +333,7 @@ h2 {
   flex-direction: column;
   gap: 1px;
   padding: 7px 9px;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--inset);
   border-radius: var(--radius-sm);
 }
 .stat strong {
@@ -348,7 +348,7 @@ h2 {
 }
 .hint {
   margin: 0;
-  color: #fcd34d;
+  color: var(--warn-text);
   font-size: 12px;
 }
 .info {
@@ -356,7 +356,7 @@ h2 {
   font-size: 12px;
 }
 .warn {
-  color: #fcd34d;
+  color: var(--warn-text);
 }
 .tabs {
   display: flex;
@@ -389,7 +389,7 @@ h2 {
 .stepper {
   display: flex;
   align-items: center;
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--field-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }

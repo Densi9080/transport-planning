@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { Combine, Merge, Spline, Trash2 } from 'lucide-vue-next'
+import { Combine, Merge, Sparkles, Spline, Trash2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
+import { useAssistant } from '@/stores/assistant'
 import { useEditor } from '@/stores/editor'
 
+import AssistantPanel from './AssistantPanel.vue'
 import NodeInspector from './NodeInspector.vue'
 import RoadPresets from './RoadPresets.vue'
 import SimPanel from './SimPanel.vue'
 import WayInspector from './WayInspector.vue'
 
 const editor = useEditor()
+const assistant = useAssistant()
+const pendingProposals = computed(() => assistant.proposals.filter((item) => item.status === 'pending').length)
 
 const ways = computed(() => editor.selectedWays)
 const nodes = computed(() => editor.selectedNodes)
@@ -19,7 +23,18 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
 </script>
 
 <template>
-  <aside class="inspector panel" aria-label="Инспектор">
+  <aside class="inspector" aria-label="Быстрый просмотр и помощник">
+    <div class="dock-tabs" role="tablist">
+      <button role="tab" :class="{ active: editor.rightTab === 'quick' }" :aria-selected="editor.rightTab === 'quick'" @click="editor.rightTab = 'quick'">
+        {{ editor.viewMode === 'sim' ? 'Расчёт' : 'Быстрый просмотр' }}
+      </button>
+      <button role="tab" :class="{ active: editor.rightTab === 'assistant' }" :aria-selected="editor.rightTab === 'assistant'" @click="editor.rightTab = 'assistant'">
+        <Sparkles :size="12" aria-hidden="true" /> Помощник
+        <span v-if="pendingProposals" class="badge">{{ pendingProposals }}</span>
+      </button>
+    </div>
+    <AssistantPanel v-show="editor.rightTab === 'assistant'" />
+    <div v-show="editor.rightTab === 'quick'" class="quick">
     <SimPanel v-if="editor.viewMode === 'sim'" />
     <RoadPresets v-else-if="editor.tool === 'road'" />
     <WayInspector v-else-if="isSingleWay" :key="ways[0]!.id" :way="ways[0]!" />
@@ -40,23 +55,41 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
         <Trash2 :size="14" aria-hidden="true" /> Удалить <kbd>Del</kbd>
       </button>
     </div>
-    <div v-else class="empty">
-      <h2>Ничего не выбрано</h2>
-      <p class="muted">Нажмите на дорогу или перекрёсток, чтобы увидеть и изменить их свойства.</p>
-      <p class="muted">Чтобы добавить дорогу, включите инструмент «Дорога» или нажмите <kbd>D</kbd>.</p>
+    <div v-else>
+      <div class="empty">
+        <p class="muted">Щёлкните по дороге или узлу, чтобы увидеть и изменить их атрибуты.</p>
+        <p class="muted">Двойной щелчок по узлу откроет редактор узла со схемой полос и фазами светофора.</p>
+        <p class="muted">Новая дорога: инструмент на панели или клавиша <kbd>D</kbd>.</p>
+      </div>
+    </div>
     </div>
   </aside>
 </template>
 
 <style scoped>
 .inspector {
-  position: absolute;
-  top: 58px;
-  right: 8px;
-  bottom: 54px;
-  width: min(320px, calc(100vw - 16px));
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--line-strong);
+}
+.quick {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  z-index: 11;
+}
+.badge {
+  min-width: 14px;
+  padding: 0 3px;
+  background: var(--warn);
+  border-radius: 7px;
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
 }
 h2 {
   margin: 0;
