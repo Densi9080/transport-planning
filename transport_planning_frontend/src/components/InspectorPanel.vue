@@ -2,10 +2,13 @@
 import { Combine, Merge, Sparkles, Spline, Trash2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
+import { customObjectOf } from '@/core/netObjects'
 import { useAssistant } from '@/stores/assistant'
 import { useEditor } from '@/stores/editor'
 
 import AssistantPanel from './AssistantPanel.vue'
+import LaneSection from './LaneSection.vue'
+import NetObjectInspector from './NetObjectInspector.vue'
 import NodeInspector from './NodeInspector.vue'
 import RoadPresets from './RoadPresets.vue'
 import SimPanel from './SimPanel.vue'
@@ -37,7 +40,11 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
     <div v-show="editor.rightTab === 'quick'" class="quick">
     <SimPanel v-if="editor.viewMode === 'sim'" />
     <RoadPresets v-else-if="editor.tool === 'road'" />
-    <WayInspector v-else-if="isSingleWay" :key="ways[0]!.id" :way="ways[0]!" />
+    <template v-else-if="isSingleWay">
+      <LaneSection :way="ways[0]!" />
+      <WayInspector :key="ways[0]!.id" :way="ways[0]!" />
+    </template>
+    <NetObjectInspector v-else-if="isSingleNode && customObjectOf(nodes[0]!.tags)" :key="`object${nodes[0]!.id}`" :node="nodes[0]!" />
     <NodeInspector v-else-if="isSingleNode" :key="nodes[0]!.id" :node="nodes[0]!" />
     <div v-else-if="isMulti" class="section">
       <h2>Выбрано объектов: {{ ways.length + nodes.length }}</h2>

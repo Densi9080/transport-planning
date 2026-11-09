@@ -190,6 +190,7 @@ export const useEditor = defineStore('editor', () => {
   const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
   const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
   const consoleOpen = ref(true)
+  const selectedLane = shallowRef<{ wayId: number; forward: boolean; lane: number; points: XY[] } | null>(null)
   const consoleLog = shallowRef<ConsoleEntry[]>([])
   const viewMode = ref<ViewMode>('engineering')
   const selection = shallowRef<SelectedItem[]>([])
@@ -339,6 +340,11 @@ export const useEditor = defineStore('editor', () => {
     void rev.value
     return doc.value?.changeCount ?? 0
   })
+  watch(selection, (items) => {
+    const lane = selectedLane.value
+    if (lane && !items.some((item) => item.kind === 'way' && item.id === lane.wayId)) selectedLane.value = null
+  })
+
   const errorCount = computed(() => issues.value.filter((i) => i.severity === 'error').length)
 
   let consoleId = 0
@@ -637,6 +643,13 @@ export const useEditor = defineStore('editor', () => {
     } else if (next !== 'select' || mode.value === 'insert') {
       mode.value = 'edit'
     }
+  }
+
+  /** Щелчок вблизи выбирает не только отрезок, но и конкретную полосу на нём. */
+  function pickLane(wayId: number, point: XY): void {
+    const net = network.value
+    const hit = net ? laneAtPoint(net, point) : null
+    selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, points: lanePolyline(hit) } : null
   }
 
   function chooseObject(next: NetObject): void {
@@ -1115,6 +1128,8 @@ export const useEditor = defineStore('editor', () => {
     objectHidden,
     objectLocked,
     consoleOpen,
+    selectedLane,
+    pickLane,
     consoleLog,
     logConsole,
     setMode,

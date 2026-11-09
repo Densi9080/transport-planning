@@ -37,6 +37,7 @@ import {
   SIM_LAYERS,
   themePaint,
   TURN_LAYERS,
+  LANE_LINE_ZOOM,
 } from '@/map/style'
 import { parseSpeed } from '@/sim/macro'
 import { losFromSpeedRatio } from '@/sim/micro'
@@ -510,6 +511,7 @@ function renderOverlay(): void {
   for (const { node, type } of customNodes.value) {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
+  if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
 
   // Предложения помощника видны на карте, пока человек не решил, применять ли их
@@ -843,6 +845,10 @@ function onClick(event: MapMouseEvent): void {
         const item = hit.kind === 'node' ? { kind: 'node' as const, id: hit.id } : { kind: 'way' as const, id: (hit as HitWay).id }
         if (original.shiftKey) editor.toggleSelect(item)
         else editor.selectOne(item)
+        if (hit.kind === 'way' && !isSim) {
+          if (map!.getZoom() >= LANE_LINE_ZOOM) editor.pickLane(hit.id, editor.projector!.toXY(position))
+          else editor.selectedLane = null
+        }
       }
       break
     }
@@ -1479,6 +1485,7 @@ function renderTraffic(): void {
 }
 
 watch(() => [traffic.result, traffic.visible], renderTraffic)
+watch(() => editor.selectedLane, () => scheduleOverlay())
 watch(() => editor.mode, (mode) => {
   if (!map) return
   map.getCanvas().style.cursor = mode === 'select' || editor.tool !== 'select' ? 'crosshair' : ''
