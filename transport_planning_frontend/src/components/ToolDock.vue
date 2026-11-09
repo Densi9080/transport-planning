@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { Circle, Footprints, Landmark, MousePointer2, Route, Scissors, TrafficCone, TrainFrontTunnel } from 'lucide-vue-next'
+import { Circle, Footprints, Gauge, Landmark, MousePointer2, OctagonAlert, Route, Scissors, TrafficCone, TrainFrontTunnel, Waves } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { type Tool, useEditor } from '@/stores/editor'
+
+import TrafficOptions from './TrafficOptions.vue'
 
 const editor = useEditor()
 
@@ -13,6 +15,9 @@ const tools: { id: Tool; label: string; key: string; icon: typeof Circle; hint: 
   { id: 'split', label: 'Разрез', key: 'X', icon: Scissors, hint: 'Клик по дороге или узлу разрезает дорогу на две' },
   { id: 'signal', label: 'Светофор', key: 'T', icon: TrafficCone, hint: 'Клик по узлу или дороге ставит или снимает светофор' },
   { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Клик по узлу или дороге ставит или снимает пешеходный переход' },
+  { id: 'speed', label: 'Скорость', key: 'S', icon: Gauge, hint: 'Два клика по одной дороге задают участок сниженной скорости. Esc отменяет начало' },
+  { id: 'bump', label: 'Лежачий', key: 'L', icon: Waves, hint: 'Клик по дороге ставит лежачего полицейского и участок низкой скорости вокруг него. Клик по нему снимает' },
+  { id: 'sign', label: 'Знак', key: 'P', icon: OctagonAlert, hint: 'Клик по дороге на подходе к перекрёстку ставит или снимает знак приоритета' },
   { id: 'bridge', label: 'Мост', key: 'B', icon: Landmark, hint: 'Клик по дороге отмечает её как мост. Чтобы отметить только часть, сначала разрежьте дорогу' },
   { id: 'tunnel', label: 'Тоннель', key: 'G', icon: TrainFrontTunnel, hint: 'Клик по дороге отмечает её как тоннель. Чтобы отметить только часть, сначала разрежьте дорогу' },
 ]
@@ -23,6 +28,7 @@ const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint 
 <template>
   <div class="dock-wrap">
     <p v-if="editor.tool !== 'select'" class="hint panel">{{ hint }}</p>
+    <TrafficOptions />
     <nav class="dock panel" aria-label="Инструменты">
       <button
         v-for="tool in tools"

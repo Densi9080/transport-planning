@@ -21,6 +21,7 @@ export type IssueCode =
   | 'glued_levels'
   | 'structure_without_layer'
   | 'floating_signal'
+  | 'floating_traffic_control'
   | 'restriction_detached'
   | 'duplicate_nodes'
   | 'no_lanes'
@@ -51,6 +52,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   glued_levels: 'Склеенные уровни',
   structure_without_layer: 'Мост или тоннель без уровня',
   floating_signal: 'Светофор вне дороги',
+  floating_traffic_control: 'Знак или лежачий вне дороги',
   restriction_detached: 'Запрет не касается дорог',
   duplicate_nodes: 'Узлы в одной точке',
   no_lanes: 'Не указано число полос',
@@ -549,6 +551,20 @@ function checkSignals({ doc, issues, drivableNodes }: Context): void {
       code: 'floating_signal',
       severity: 'warning',
       message: `Светофор ${node.id} не стоит на проезжей дороге`,
+      position: { lat: node.lat, lon: node.lon },
+      wayIds: [],
+      nodeIds: [node.id],
+    })
+  }
+  for (const node of doc.nodes.values()) {
+    const tags = node.tags
+    const isControl = !!tags?.traffic_calming || tags?.highway === 'stop' || tags?.highway === 'give_way'
+    if (!isControl || drivableNodes.has(node.id)) continue
+    issues.push({
+      id: `control-${node.id}`,
+      code: 'floating_traffic_control',
+      severity: 'warning',
+      message: `Лежачий полицейский или знак ${node.id} не стоит на проезжей дороге`,
       position: { lat: node.lat, lon: node.lon },
       wayIds: [],
       nodeIds: [node.id],

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeftRight, Minus, Plus, Scissors, Sparkles, Trash2 } from 'lucide-vue-next'
+import { ArrowLeftRight, Copy, Minus, Plus, Scissors, Sparkles, Spline, Trash2 } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
 import { applyElevationRamp, clearElevation, maxSlopePercent, wayHeights } from '@/core/elevation'
@@ -44,6 +44,7 @@ const heights = computed(() => {
     hasEle: props.way.nds.some((id) => doc.nodes.get(id)?.tags?.ele !== undefined),
   }
 })
+const parallelGap = ref(12)
 const rampStart = ref(0)
 const rampEnd = ref(5.5)
 const slope = computed(() => {
@@ -287,6 +288,26 @@ function changeLayer(delta: number): void {
         <span v-if="slope > 12" class="warn">Круто для автомобильной дороги.</span>
       </p>
       <button v-if="heights.hasEle" class="btn block small" @click="resetRamp">Сбросить высоты</button>
+    </div>
+
+    <div class="section">
+      <div class="eyebrow">Геометрия</div>
+      <div class="grid-2">
+        <button class="btn small" @click="editor.smoothSelected">
+          <Spline :size="13" aria-hidden="true" /> Сгладить
+        </button>
+        <button class="btn small" @click="editor.duplicateSelected">
+          <Copy :size="13" aria-hidden="true" /> Дублировать
+        </button>
+      </div>
+      <div class="field">
+        <label for="parallel-gap">Параллельная дорога, расстояние в метрах</label>
+        <input id="parallel-gap" v-model.number="parallelGap" class="input" type="number" min="1" step="0.5" />
+      </div>
+      <div class="grid-2">
+        <button class="btn small" @click="editor.parallelSelected(parallelGap, 1)">Слева</button>
+        <button class="btn small" @click="editor.parallelSelected(parallelGap, -1)">Справа</button>
+      </div>
     </div>
 
     <div class="section">

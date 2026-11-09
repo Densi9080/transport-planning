@@ -21,6 +21,7 @@ export const SOURCE_IDS = [
   'crossings',
   'arrows',
   'signals',
+  'trafficSigns',
   'labels',
   'elevated',
   'simLoad',
@@ -247,6 +248,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
     { id: 'signals', type: 'symbol', source: 'signals', minzoom: 14, layout: {
       'icon-image': 'traffic-light',
       'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.55, 18, 1, 21, 1.6],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    } },
+    { id: 'traffic-signs', type: 'symbol', source: 'trafficSigns', minzoom: 15, layout: {
+      'icon-image': ['get', 'icon'],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 15, 0.5, 18, 0.9, 21, 1.4],
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },

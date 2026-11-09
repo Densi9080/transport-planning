@@ -29,6 +29,7 @@ import {
   type TurnKind,
   turnKind,
 } from './topology'
+import { reducedSections, SECTION_SPEEDS } from './traffic'
 import type { OWay, XY } from './types'
 
 export type SceneLayer =
@@ -39,6 +40,7 @@ export type SceneLayer =
   | 'arrows'
   | 'crossings'
   | 'signals'
+  | 'trafficSigns'
   | 'minor'
   | 'graphLinks'
   | 'graphNodes'
@@ -488,6 +490,24 @@ function buildCrossings(
   }
 }
 
+function buildTrafficSigns(doc: OsmDoc, signs: Feature[], projector: Projector): void {
+  for (const node of doc.nodes.values()) {
+    const tags = node.tags
+    if (!tags) continue
+    const icon = tags.traffic_calming
+      ? 'sign-bump'
+      : tags.highway === 'stop'
+        ? 'sign-stop'
+        : tags.highway === 'give_way'
+          ? 'sign-give-way'
+          : null
+    if (icon) signs.push(pointFeature(projector.toXY(node), projector, { icon }))
+  }
+  for (const { point, speed } of reducedSections(doc, projector)) {
+    if (SECTION_SPEEDS.includes(speed)) signs.push(pointFeature(point, projector, { icon: `sign-speed-${speed}` }))
+  }
+}
+
 function buildLabels(network: Network, labels: Feature[], projector: Projector, doc: OsmDoc): void {
   const longest = new Map<string, Link>()
   for (const link of network.links) {
@@ -563,6 +583,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   const arrows = EMPTY()
   const crossings = EMPTY()
   const signals = EMPTY()
+  const trafficSigns = EMPTY()
   const minor = EMPTY()
   const graphLinks = EMPTY()
   const graphNodes = EMPTY()
@@ -635,6 +656,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   }
 
   buildCrossings(doc, network, crossings, signals, projector)
+  buildTrafficSigns(doc, trafficSigns, projector)
   buildLabels(network, labels, projector, doc)
   for (const way of doc.ways.values()) buildMinor(way, doc, projector, minor)
 
@@ -648,6 +670,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       arrows: collection(arrows),
       crossings: collection(crossings),
       signals: collection(signals),
+      trafficSigns: collection(trafficSigns),
       minor: collection(minor),
       graphLinks: collection(graphLinks),
       graphNodes: collection(graphNodes),

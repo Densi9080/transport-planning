@@ -9,6 +9,7 @@ import {
   junctionConnectors,
 } from '@/core/scene'
 import { type Arm, buildNetwork, type Link, type Network, type TurnKind } from '@/core/topology'
+import { signApplies } from '@/core/traffic'
 import type { Tags, XY } from '@/core/types'
 
 import type { Car } from './micro'
@@ -135,6 +136,8 @@ export class SimEdge {
   /** Полная длина вместе с площадками перекрёстков: для макромодели. */
   readonly length: number
   outline: XY[] = []
+  /** На подходе стоит знак «Стоп» или «Уступи дорогу». */
+  yields = false
 
   // Результаты микромодели
   speedRatio = 1
@@ -240,6 +243,7 @@ function buildEdges(doc: OsmDoc, network: Network, net: SimNet): Map<Arm, { in?:
         forward ? link.nodes.at(-1)! : link.nodes[0]!,
         tags,
       )
+      edge.yields = link.nodes.some((id) => signApplies(doc.nodes.get(id)?.tags, forward))
       const startTangent = startGeometry?.mitreTangent ?? null
       const endTangent = endGeometry?.mitreTangent ?? null
       const list = forward ? offsets.forward : offsets.backward
@@ -326,6 +330,8 @@ const TURN_ORDER: Record<TurnKind, number> = { through: 3, right: 2, left: 1, re
 
 /** Преимущество по правилам: главная дорога, затем прямо перед поворотом, затем помеха справа. */
 function hasPriority(a: SimConnector, b: SimConnector): boolean {
+  const yieldsA = a.fromLane.edge.yields
+  if (yieldsA !== b.fromLane.edge.yields) return !yieldsA
   const rankA = classRank(a.fromLane.edge.tags)
   const rankB = classRank(b.fromLane.edge.tags)
   if (rankA !== rankB) return rankA > rankB

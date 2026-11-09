@@ -21,12 +21,34 @@ import {
   unglueNode,
 } from '@/core/ops'
 import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
+import { parseProfile, totalWidth } from '@/core/lanes'
 import { buildNetwork } from '@/core/topology'
+import {
+  addSpeedBump,
+  applySpeedSection,
+  type BumpKind,
+  createParallelWay,
+  removeSpeedBump,
+  type SignKind,
+  smoothWay,
+  toggleSign,
+} from '@/core/traffic'
 import type { LatLon, Tags } from '@/core/types'
 import type { BasemapId } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 
-export type Tool = 'select' | 'node' | 'road' | 'split' | 'signal' | 'crossing' | 'bridge' | 'tunnel'
+export type Tool =
+  | 'select'
+  | 'node'
+  | 'road'
+  | 'split'
+  | 'signal'
+  | 'crossing'
+  | 'bridge'
+  | 'tunnel'
+  | 'speed'
+  | 'bump'
+  | 'sign'
 export type ViewMode = 'engineering' | 'graph' | '3d' | 'sim'
 export type Basemap = BasemapId
 
@@ -100,6 +122,13 @@ export const useEditor = defineStore('editor', () => {
   const presetId = ref(DEFAULT_PRESET_ID)
   const drawMode = ref<DrawMode>('polyline')
   const drawPoints = shallowRef<DrawPoint[]>([])
+  const speedStart = shallowRef<{ wayId: number; position: LatLon } | null>(null)
+  const trafficOptions = reactive({
+    sectionSpeed: 30,
+    bumpKind: 'hump' as BumpKind,
+    bumpSpeed: 20,
+    signKind: 'give_way' as SignKind,
+  })
 
   const basemap = ref<Basemap>('none')
   const basemapOpacity = ref(1)
@@ -356,6 +385,7 @@ export const useEditor = defineStore('editor', () => {
 
   function setTool(next: Tool): void {
     if (tool.value === 'road' && next !== 'road') drawPoints.value = []
+    speedStart.value = null
     tool.value = next
   }
 
@@ -519,6 +549,91 @@ export const useEditor = defineStore('editor', () => {
     toast(`${title}: ${enabled ? 'отмечен, чтобы часть дороги, сначала разрежьте её' : 'снят'}`, 'success')
   }
 
+  /** Первый клик задаёт начало участка, второй на той же дороге — его конец. */
+  function pickSpeedPoint(wayId: number, position: LatLon): void {
+    const start = speedStart.value
+    if (!start) {
+      speedStart.value = { wayId, position }
+      return
+    }
+    if (start.wayId !== wayId) {
+      toast('Конец участка должен быть на той же дороге', 'error')
+      return
+    }
+    speedStart.value = null
+    const speed = trafficOptions.sectionSpeed
+    const id = mutate('Участок скорости', (d, p) => applySpeedSection(d, p, wayId, start.position, position, speed))
+    if (id !== undefined) {
+      selectOne({ kind: 'way', id })
+      toast(`Участок скорости: ${speed} км/ч`, 'success')
+    }
+  }
+
+  function placeBump(target: { nodeId?: number; wayId?: number; position: LatLon }): void {
+    const d = doc.value
+    if (!d) return
+    if (target.nodeId !== undefined && d.nodes.get(target.nodeId)?.tags?.traffic_calming) {
+      const nodeId = target.nodeId
+      mutate('Снятие лежачего полицейского', (doc_, p) => removeSpeedBump(doc_, p, nodeId))
+      selection.value = []
+      toast('Лежачий полицейский снят', 'success')
+      return
+    }
+    const wayId = target.wayId ?? (target.nodeId !== undefined ? d.waysOfNode(target.nodeId)[0] : undefined)
+    if (wayId === undefined) return
+    const options = { kind: trafficOptions.bumpKind, speed: trafficOptions.bumpSpeed }
+    const placed = mutate('Лежачий полицейский', (doc_, p) => addSpeedBump(doc_, p, wayId, target.position, options))
+    if (placed) {
+      selectOne({ kind: 'node', id: placed.nodeId })
+      toast(`Лежачий полицейский: проезд ${options.speed} км/ч`, 'success')
+    }
+  }
+
+  function placeSign(target: { nodeId?: number; wayId?: number; position: LatLon }): void {
+    const kind = trafficOptions.signKind
+    const placed = mutate('Знак приоритета', (d, p) => toggleSign(d, p, target, kind))
+    if (placed) {
+      selectOne({ kind: 'node', id: placed.nodeId })
+      const title = kind === 'stop' ? 'Знак «Стоп»' : 'Знак «Уступи дорогу»'
+      toast(`${title}: ${placed.enabled ? 'поставлен' : 'снят'}`, 'success')
+    }
+  }
+
+  function smoothSelected(): void {
+    const ways = selectedWays.value
+    if (ways.length === 0) {
+      toast('Выберите дорогу, чтобы сгладить её')
+      return
+    }
+    const added = mutate('Сглаживание дороги', (d, p) => ways.reduce((sum, way) => sum + smoothWay(d, p, way.id), 0))
+    if (added) toast(`Дорога сглажена, новых точек: ${added}`, 'success')
+    else if (added === 0) toast('Сглаживать нечего: нужны хотя бы три точки и достаточная длина')
+  }
+
+  /** Копия выбранной дороги рядом: side 1 — слева по ходу узлов, -1 — справа. */
+  function parallelSelected(gap: number, side: 1 | -1, label = 'Параллельная дорога'): void {
+    const way = selectedWays.value[0]
+    if (!way) {
+      toast('Выберите дорогу')
+      return
+    }
+    if (!Number.isFinite(gap) || gap <= 0) {
+      toast('Расстояние должно быть больше нуля', 'error')
+      return
+    }
+    const id = mutate(label, (d, p) => createParallelWay(d, p, way.id, gap * side))
+    if (id !== undefined) selectOne({ kind: 'way', id })
+  }
+
+  function duplicateSelected(): void {
+    const way = selectedWays.value[0]
+    if (!way) {
+      toast('Выберите дорогу, чтобы продублировать её')
+      return
+    }
+    parallelSelected(totalWidth(parseProfile(way.tags ?? {})) + 2, 1, 'Дублирование дороги')
+  }
+
   function finishRoad(): void {
     const points = drawPoints.value
     drawPoints.value = []
@@ -625,5 +740,13 @@ export const useEditor = defineStore('editor', () => {
     toggleOnNode,
     toggleWayStructure,
     finishRoad,
+    speedStart,
+    trafficOptions,
+    pickSpeedPoint,
+    placeBump,
+    placeSign,
+    smoothSelected,
+    parallelSelected,
+    duplicateSelected,
   }
 })

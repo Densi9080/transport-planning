@@ -28,6 +28,9 @@ const TOOL_KEYS: Record<string, Tool> = {
   c: 'crossing',
   b: 'bridge',
   g: 'tunnel',
+  s: 'speed',
+  l: 'bump',
+  p: 'sign',
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -80,10 +83,16 @@ function onKeyDown(event: KeyboardEvent): void {
     else editor.undo()
     return
   }
+  if ((event.ctrlKey || event.metaKey) && code === 'KeyD') {
+    event.preventDefault()
+    editor.duplicateSelected()
+    return
+  }
   if (event.ctrlKey || event.metaKey || event.altKey) return
 
   if (key === 'escape') {
     if (editor.drawPoints.length > 0) editor.drawPoints = []
+    else if (editor.speedStart) editor.speedStart = null
     else if (editor.tool !== 'select') editor.setTool('select')
     else editor.select([])
     return

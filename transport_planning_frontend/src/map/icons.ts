@@ -1,5 +1,7 @@
 import type { Map as MlMap } from 'maplibre-gl'
 
+import { SECTION_SPEEDS } from '@/core/traffic'
+
 const SIZE = 96
 const INK = 'rgba(236, 238, 242, 0.82)'
 
@@ -100,7 +102,83 @@ function direction(ctx: CanvasRenderingContext2D): void {
   ctx.fill()
 }
 
+const SIGN_SIZE = 72
+
+function stopSign(ctx: CanvasRenderingContext2D): void {
+  const c = SIGN_SIZE / 2
+  const r = c - 3
+  ctx.beginPath()
+  for (let i = 0; i < 8; i++) {
+    const angle = Math.PI / 8 + (i * Math.PI) / 4
+    ctx.lineTo(c + r * Math.cos(angle), c + r * Math.sin(angle))
+  }
+  ctx.closePath()
+  ctx.fillStyle = '#dc2626'
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 4
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(16, c - 5, SIGN_SIZE - 32, 10)
+}
+
+function giveWaySign(ctx: CanvasRenderingContext2D): void {
+  ctx.beginPath()
+  ctx.moveTo(5, 8)
+  ctx.lineTo(SIGN_SIZE - 5, 8)
+  ctx.lineTo(SIGN_SIZE / 2, SIGN_SIZE - 6)
+  ctx.closePath()
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#dc2626'
+  ctx.lineWidth = 8
+  ctx.lineJoin = 'round'
+  ctx.fill()
+  ctx.stroke()
+}
+
+function bumpSign(ctx: CanvasRenderingContext2D): void {
+  const c = SIGN_SIZE / 2
+  ctx.beginPath()
+  ctx.arc(c, c, c - 3, 0, Math.PI * 2)
+  ctx.fillStyle = '#facc15'
+  ctx.strokeStyle = '#111317'
+  ctx.lineWidth = 4
+  ctx.fill()
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(12, c + 13)
+  ctx.lineTo(23, c + 13)
+  ctx.quadraticCurveTo(c, c - 26, SIGN_SIZE - 23, c + 13)
+  ctx.lineTo(SIGN_SIZE - 12, c + 13)
+  ctx.lineWidth = 6
+  ctx.stroke()
+}
+
+function speedSign(speed: number): Painter {
+  return (ctx) => {
+    const c = SIGN_SIZE / 2
+    ctx.beginPath()
+    ctx.arc(c, c, c - 6, 0, Math.PI * 2)
+    ctx.fillStyle = '#ffffff'
+    ctx.strokeStyle = '#dc2626'
+    ctx.lineWidth = 9
+    ctx.fill()
+    ctx.stroke()
+    ctx.fillStyle = '#111317'
+    ctx.font = '700 30px "Segoe UI", system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(speed), c, c + 2)
+  }
+}
+
 export function registerIcons(map: MlMap): void {
+  map.addImage('sign-stop', makeImage(stopSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  map.addImage('sign-give-way', makeImage(giveWaySign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  map.addImage('sign-bump', makeImage(bumpSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  for (const speed of SECTION_SPEEDS) {
+    map.addImage(`sign-speed-${speed}`, makeImage(speedSign(speed), SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  }
   for (const [name, turns] of Object.entries(ARROWS)) {
     map.addImage(
       `arrow-${name}`,

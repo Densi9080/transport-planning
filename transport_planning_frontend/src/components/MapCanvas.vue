@@ -129,7 +129,7 @@ function pickableNode(id: number): boolean {
   const doc = editor.doc!
   if (editor.selection.some((item) => item.kind === 'node' && item.id === id)) return true
   const node = doc.nodes.get(id)
-  if (node?.tags?.highway) return true
+  if (node?.tags?.highway || node?.tags?.traffic_calming) return true
   if (editor.viewMode === 'graph') return true
   return doc.waysOfNode(id).length > 1
 }
@@ -332,6 +332,7 @@ function renderOverlay(): void {
 
   if (editor.tool === 'road') renderDrawPreview(features)
   else hud.value = []
+  if (editor.speedStart) features.push(pointOf(editor.speedStart.position, { role: 'draw-point' }))
 
   setData('overlay', { type: 'FeatureCollection', features })
 }
@@ -540,6 +541,21 @@ function onClick(event: MapMouseEvent): void {
     case 'tunnel':
       if (hit?.kind === 'way') editor.toggleWayStructure(hit.id, editor.tool)
       break
+    case 'speed':
+      if (hit?.kind === 'way') editor.pickSpeedPoint(hit.id, editor.projector!.toLatLon(hit.point))
+      else if (hit?.kind === 'node') {
+        const wayId = editor.speedStart?.wayId ?? editor.doc!.waysOfNode(hit.id)[0]
+        if (wayId !== undefined) editor.pickSpeedPoint(wayId, position)
+      }
+      scheduleOverlay()
+      break
+    case 'bump':
+    case 'sign': {
+      const place = editor.tool === 'bump' ? editor.placeBump : editor.placeSign
+      if (hit?.kind === 'node') place({ nodeId: hit.id, position })
+      else if (hit?.kind === 'way') place({ wayId: hit.id, position: editor.projector!.toLatLon(hit.point) })
+      break
+    }
   }
 }
 
@@ -587,7 +603,7 @@ function applyView(): void {
   m.setLayoutProperty('sim-signals', 'visibility', isSim && sim.level === 'micro' ? 'visible' : 'none')
   visible(['arrows'], lane && editor.layers.arrows)
   visible(['crossings'], lane && editor.layers.crossings)
-  visible(['signals'], editor.layers.signals)
+  visible(['signals', 'traffic-signs'], editor.layers.signals)
   visible(['labels'], lane && editor.layers.labels)
   visible(['minor'], editor.layers.minor)
   visible(['rail'], editor.layers.rail)
