@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Circle, Footprints, Landmark, MousePointer2, Route, Scissors, TrafficCone, TrainFrontTunnel, Workflow } from 'lucide-vue-next'
+import { Circle, Crosshair, Footprints, Landmark, MousePointer2, Route, Scissors, TrafficCone, TrainFrontTunnel, Trash2, Workflow } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { type Tool, useEditor } from '@/stores/editor'
@@ -16,6 +16,7 @@ const tools: { id: Tool; label: string; key: string; icon: typeof Circle; hint: 
   { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Щелчок по узлу или дороге ставит или снимает переход' },
   { id: 'bridge', label: 'Мост', key: 'B', icon: Landmark, hint: 'Щелчок по дороге отмечает её как мост' },
   { id: 'tunnel', label: 'Тоннель', key: 'G', icon: TrainFrontTunnel, hint: 'Щелчок по дороге отмечает её как тоннель' },
+  { id: 'identify', label: 'Координаты', key: 'I', icon: Crosshair, hint: 'Щелчок по карте показывает координаты и ссылку на Яндекс Карты' },
 ]
 
 const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint ?? '')
@@ -37,6 +38,12 @@ const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint 
         <component :is="tool.icon" :size="17" aria-hidden="true" />
         <span>{{ tool.label }}</span>
         <kbd>{{ tool.key }}</kbd>
+      </button>
+      <span class="sep" aria-hidden="true" />
+      <button class="tool danger" :disabled="editor.selection.length === 0" title="Удалить выбранное (Delete)" @click="editor.deleteSelection">
+        <Trash2 :size="17" aria-hidden="true" />
+        <span>Удалить</span>
+        <kbd>Del</kbd>
       </button>
     </nav>
   </div>
@@ -86,6 +93,18 @@ const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint 
   border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: 11px;
+}
+.sep {
+  flex: none;
+  width: 1px;
+  margin: 4px 3px;
+  background: var(--line-strong);
+}
+.tool:disabled {
+  opacity: 0.4;
+}
+.tool.danger:hover:not(:disabled) {
+  color: var(--err-text);
 }
 .tool:hover {
   background: var(--raised);

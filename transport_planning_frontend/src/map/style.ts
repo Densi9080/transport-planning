@@ -44,6 +44,7 @@ export const SOURCE_IDS = [
   'graphLinks',
   'graphNodes',
   'issues',
+  'netStops',
   'overlay',
 ] as const
 
@@ -417,6 +418,30 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#0b0c0e',
       'circle-stroke-width': 1.5,
     } },
+    { id: 'node-dots', type: 'circle', source: 'graphNodes', minzoom: 13, filter: ['>=', ['get', 'degree'], 3], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 2.5, 18, 5, 20, 7],
+      'circle-color': '#e5e7eb',
+      'circle-stroke-color': '#111827',
+      'circle-stroke-width': 1,
+    } },
+    { id: 'net-stop-point', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'point'], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 6],
+      'circle-color': '#2563eb',
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1,
+    } },
+    { id: 'net-stop-area', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'area'], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 6],
+      'circle-color': 'rgba(37,99,235,0.2)',
+      'circle-stroke-color': '#60a5fa',
+      'circle-stroke-width': 1.5,
+    } },
+    { id: 'net-stop', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stop'], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 6, 18, 14],
+      'circle-color': 'rgba(0,0,0,0)',
+      'circle-stroke-color': '#93c5fd',
+      'circle-stroke-width': 2,
+    } },
     { id: 'traffic-lane', type: 'line', source: 'trafficLoad', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': ['interpolate', ['linear'], ['get', 'ratio'], 0, '#22c55e', 0.5, '#facc15', 0.8, '#f97316', 1, '#dc2626'],
       'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['+', 1, ['*', ['get', 'ratio'], 2]], 19, ['+', 3, ['*', ['get', 'ratio'], 7]]],
@@ -534,7 +559,7 @@ export function buildLayers(lat: number): LayerSpecification[] {
 
 /** Какие слои видны в каждом режиме просмотра. Остальные слои зависят только от настроек. */
 export const ENGINEERING_LAYERS = [
-  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid',
+  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid', 'lane-line', 'lane-arrow',
   'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge',
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']

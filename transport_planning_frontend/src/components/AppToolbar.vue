@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, BoxSelect, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
+import { Activity, BoxSelect, Save, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
 
 import { type EditMode, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
@@ -16,7 +16,8 @@ const modes: { id: EditMode; label: string; hint: string; icon: typeof Pencil }[
 ]
 
 function toggleSim(): void {
-  editor.viewMode = editor.viewMode === 'sim' ? 'engineering' : 'sim'
+  if (editor.viewMode === 'sim') editor.viewMode = 'engineering'
+  else editor.enterSimulation()
 }
 </script>
 
@@ -24,6 +25,10 @@ function toggleSim(): void {
   <div class="toolbar" role="toolbar" aria-label="Панель инструментов">
     <button class="tool" title="Отменить (Ctrl+Z)" aria-label="Отменить" :disabled="!editor.canUndo" @click="editor.undo"><Undo2 :size="15" /></button>
     <button class="tool" title="Повторить (Ctrl+Y)" aria-label="Повторить" :disabled="!editor.canRedo" @click="editor.redo"><Redo2 :size="15" /></button>
+    <button class="btn small" :class="{ primary: editor.saveState === 'dirty' }" :disabled="editor.saveState !== 'dirty'" title="Сохранить правки (Ctrl+S)" @click="editor.saveNow">
+      <Save :size="13" aria-hidden="true" />
+      Сохранить
+    </button>
     <span class="sep" />
 
     <div v-if="editor.viewMode !== 'sim'" class="segmented modes" role="group" aria-label="Режим работы с сетью">

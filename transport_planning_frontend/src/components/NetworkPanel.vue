@@ -7,6 +7,7 @@ import {
   CornerUpRight,
   Eye,
   EyeOff,
+  Filter,
   Gauge,
   Lock,
   LockOpen,
@@ -23,9 +24,9 @@ import {
 import { computed, ref } from 'vue'
 
 import { isDrivable } from '@/core/lanes'
-import { matchesNode, matchesWay, type NetObject } from '@/core/netObjects'
+import { type FilterOp, matchesNode, matchesWay, type NetObject, passesFilter } from '@/core/netObjects'
 import { junctionMovements } from '@/core/topology'
-import type { LatLon } from '@/core/types'
+import type { LatLon, Tags } from '@/core/types'
 import { type SelectedItem, useEditor } from '@/stores/editor'
 
 import TransitPanel from './TransitPanel.vue'
@@ -49,15 +50,15 @@ const groups: { title: string; rows: Row[] }[] = [
     rows: [
       { id: 'nodes', label: 'Узлы', icon: Circle },
       { id: 'links', label: 'Отрезки', icon: Spline },
-      { id: 'turns', label: 'Повороты', icon: CornerUpRight, layers: ['turnPaths'] },
+      { id: 'turns', label: 'Повороты', icon: CornerUpRight },
     ],
   },
   {
     title: 'Общественный транспорт',
     rows: [
-      { id: 'stopPoints', label: 'Пункты остановки', icon: MapPin, layers: ['transit'] },
-      { id: 'stopAreas', label: 'Зоны остановок', icon: SquareDashed, layers: ['transit'] },
-      { id: 'stops', label: 'Остановки', icon: Users, layers: ['transit'] },
+      { id: 'stopPoints', label: 'Пункты остановки', icon: MapPin },
+      { id: 'stopAreas', label: 'Зоны остановок', icon: SquareDashed },
+      { id: 'stops', label: 'Остановки', icon: Users },
       { id: 'routes', label: 'Маршруты', icon: Route, layers: ['transit'] },
     ],
   },
@@ -91,6 +92,7 @@ interface Item {
   key: string
   label: string
   sub?: string
+  tags?: Tags
   /** Сколько объектов стоит за строкой: в узле их может быть несколько. */
   weight?: number
   select?: SelectedItem
@@ -106,7 +108,7 @@ const index = computed<Record<NetObject, Item[]>>(() => {
   for (const node of doc.nodes.values()) {
     for (const type of ['stopPoints', 'stopAreas', 'stopSigns', 'signals', 'desiredSpeed', 'reducedSpeed', 'priorityRules', 'detectors', 'inflows'] as NetObject[]) {
       if (matchesNode(type, node, doc)) {
-        result[type].push({ key: `n${node.id}`, label: node.tags?.name ?? `Узел ${node.id}`, sub: String(node.id), select: { kind: 'node', id: node.id }, position: node })
+        result[type].push({ key: `n${node.id}`, label: node.tags?.name ?? `Узел ${node.id}`, sub: String(node.id), tags: node.tags, select: { kind: 'node', id: node.id }, position: node })
       }
     }
   }
@@ -116,41 +118,61 @@ const index = computed<Record<NetObject, Item[]>>(() => {
     if (arms.length < 3) continue
     const node = doc.nodes.get(id)
     if (!node) continue
-    result.nodes.push({ key: `j${id}`, label: `Узел ${id}`, sub: `подходов ${arms.length}`, select: { kind: 'node', id }, position: node })
+    result.nodes.push({ key: `j${id}`, label: `Узел ${id}`, sub: `подходов ${arms.length}`, tags: node.tags, select: { kind: 'node', id }, position: node })
     if (network) {
       const movements = junctionMovements(doc, network, id).length
-      result.turns.push({ key: `t${id}`, label: `Узел ${id}`, sub: `поворотов ${movements}`, weight: movements, select: { kind: 'node', id }, position: node })
+      result.turns.push({ key: `t${id}`, label: `Узел ${id}`, sub: `поворотов ${movements}`, weight: movements, tags: node.tags, select: { kind: 'node', id }, position: node })
     }
   }
 
   for (const way of doc.ways.values()) {
     const middle = doc.nodes.get(way.nds[Math.floor(way.nds.length / 2)]!)
     if (isDrivable(way.tags)) {
-      result.links.push({ key: `w${way.id}`, label: way.tags?.name ?? way.tags?.highway ?? 'Отрезок', sub: String(way.id), select: { kind: 'way', id: way.id }, position: middle })
+      result.links.push({ key: `w${way.id}`, label: way.tags?.name ?? way.tags?.highway ?? 'Отрезок', sub: String(way.id), tags: way.tags, select: { kind: 'way', id: way.id }, position: middle })
     }
     if (matchesWay('stopAreas', way)) {
-      result.stopAreas.push({ key: `w${way.id}`, label: way.tags?.name ?? `Платформа ${way.id}`, sub: String(way.id), select: { kind: 'way', id: way.id }, position: middle })
+      result.stopAreas.push({ key: `w${way.id}`, label: way.tags?.name ?? `Платформа ${way.id}`, sub: String(way.id), tags: way.tags, select: { kind: 'way', id: way.id }, position: middle })
     }
   }
 
   for (const relation of doc.relations.values()) {
     if (relation.tags?.public_transport !== 'stop_area') continue
     const first = relation.members.find(([type, ref]) => type === 'node' && doc.nodes.has(ref))
-    result.stops.push({ key: `r${relation.id}`, label: relation.tags.name ?? `Остановка ${relation.id}`, sub: `объектов ${relation.members.length}`, position: first ? doc.nodes.get(first[1]) : undefined })
+    result.stops.push({ key: `r${relation.id}`, label: relation.tags.name ?? `Остановка ${relation.id}`, sub: `объектов ${relation.members.length}`, tags: relation.tags, position: first ? doc.nodes.get(first[1]) : undefined })
   }
   return result
 })
 
-function countOf(id: NetObject): number {
-  if (id === 'routes') return editor.lines.length
-  return index.value[id].reduce((sum, item) => sum + (item.weight ?? 1), 0)
+function activeItems(id: NetObject): Item[] {
+  return index.value[id].filter((item) => passesFilter(editor.objectFilter[id], item.tags))
+}
+
+function countOf(id: NetObject): string {
+  if (id === 'routes') return String(editor.lines.length)
+  const total = index.value[id].reduce((sum, item) => sum + (item.weight ?? 1), 0)
+  if (!editor.objectFilter[id]?.enabled) return String(total)
+  return `${activeItems(id).reduce((sum, item) => sum + (item.weight ?? 1), 0)} / ${total}`
+}
+
+const openFilter = ref<NetObject | null>(null)
+const FILTER_OPS: { id: FilterOp; label: string }[] = [
+  { id: 'eq', label: '=' },
+  { id: 'ne', label: '≠' },
+  { id: 'gt', label: '>' },
+  { id: 'lt', label: '<' },
+  { id: 'has', label: 'есть' },
+]
+
+function toggleFilterEditor(id: NetObject): void {
+  editor.objectFilter[id] ??= { enabled: false, key: '', op: 'eq', value: '' }
+  openFilter.value = openFilter.value === id ? null : id
 }
 
 const activeLabel = computed(() => groups.flatMap((group) => group.rows).find((row) => row.id === editor.activeObject)?.label ?? '')
 
 const items = computed(() => {
   const needle = query.value.trim().toLowerCase()
-  const list = index.value[editor.activeObject]
+  const list = activeItems(editor.activeObject)
   return needle ? list.filter((item) => `${item.label} ${item.sub ?? ''}`.toLowerCase().includes(needle)) : list
 })
 
@@ -159,8 +181,8 @@ function isVisible(row: Row): boolean {
   return !editor.objectHidden[row.id]
 }
 
-function canHide(row: Row): boolean {
-  return row.id !== 'links' && row.id !== 'nodes'
+function canHide(_row: Row): boolean {
+  return true
 }
 
 function toggleVisible(row: Row): void {
@@ -197,6 +219,16 @@ function isSelected(item: Item): boolean {
               <EyeOff v-else :size="13" class="faint" />
             </template>
           </button>
+          <button
+            class="square"
+            :class="{ on: editor.objectFilter[row.id]?.enabled }"
+            :aria-expanded="openFilter === row.id"
+            :aria-label="`Фильтр: ${row.label}`"
+            title="Фильтр этого типа объектов"
+            @click="toggleFilterEditor(row.id)"
+          >
+            <Filter :size="12" :class="{ faint: !editor.objectFilter[row.id]?.enabled }" />
+          </button>
           <button class="main" :class="{ off: !isVisible(row) }" :aria-pressed="editor.activeObject === row.id" @click="editor.setActiveObject(row.id)">
             <component :is="row.icon" :size="14" aria-hidden="true" />
             <span class="ellipsis">{{ row.label }}</span>
@@ -213,6 +245,19 @@ function isSelected(item: Item): boolean {
             <LockOpen v-else :size="12" class="faint" />
           </button>
         </div>
+        <template v-for="row in group.rows" :key="`f${row.id}`">
+          <div v-if="openFilter === row.id && editor.objectFilter[row.id]" class="filter-box">
+            <div class="filter-title">Фильтр: {{ row.label }}</div>
+            <div class="filter-row">
+              <input v-model="editor.objectFilter[row.id]!.key" class="input" placeholder="Атрибут, например lanes" aria-label="Атрибут" />
+              <select v-model="editor.objectFilter[row.id]!.op" class="input op" aria-label="Условие">
+                <option v-for="op in FILTER_OPS" :key="op.id" :value="op.id">{{ op.label }}</option>
+              </select>
+              <input v-model="editor.objectFilter[row.id]!.value" class="input" placeholder="Значение" aria-label="Значение" :disabled="editor.objectFilter[row.id]!.op === 'has'" />
+            </div>
+            <label class="layer"><input v-model="editor.objectFilter[row.id]!.enabled" type="checkbox" /> Включить фильтр</label>
+          </div>
+        </template>
       </section>
       <details class="layers">
         <summary class="eyebrow">Слои карты</summary>
@@ -354,6 +399,32 @@ section {
   padding: 0;
   background: transparent;
   border: 0;
+}
+.square.on {
+  color: var(--accent);
+}
+.filter-box {
+  margin: 2px 8px 6px;
+  padding: 6px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+}
+.filter-title {
+  margin-bottom: 4px;
+  color: var(--muted);
+}
+.filter-row {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+.filter-row input {
+  flex: 1;
+  min-width: 0;
+}
+.filter-row .op {
+  flex: none;
+  width: 58px;
 }
 .layers {
   padding: 3px 8px 6px;

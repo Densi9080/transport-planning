@@ -22,7 +22,8 @@ import {
   unglueNode,
 } from '@/core/ops'
 import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
-import type { CrsId } from '@/core/crs'
+import { type CrsId, normalizeCrs, setCustomCrs } from '@/core/crs'
+import type { CrsEntry } from '@/core/crsCatalog'
 import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lanePorts, laneStubNearNode } from '@/core/lanePick'
 import { nodeConnectors, setLaneConnection } from '@/core/laneOps'
 import { laneOffsets, parseProfile, totalWidth } from '@/core/lanes'
@@ -54,7 +55,7 @@ import {
 import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
-import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, pickTypeOf } from '@/core/netObjects'
+import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
 
 export type Tool =
   | 'select'
@@ -75,6 +76,7 @@ export type Tool =
   | 'stopPoint'
   | 'stopArea'
   | 'stopGroup'
+  | 'identify'
 
 /** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
 export type ActiveType = 'auto' | 'links' | 'nodes'
@@ -154,6 +156,9 @@ const TILE_URL_KEY = 'osm-editor-tile-url'
 const THEME_KEY = 'osm-editor-theme-v2'
 const FILTER_KEY = 'osm-editor-filter:'
 const CRS_KEY = 'osm-editor-crs'
+const CRS_RECENT_KEY = 'osm-editor-crs-recent'
+const CRS_CUSTOM_KEY = 'osm-editor-crs-custom'
+const CRS_RECENT_LIMIT = 8
 const CONNECTOR_STUB_M = 25
 const STOP_GROUP_RADIUS_M = 100
 
@@ -162,6 +167,15 @@ function readStored(key: string): string | null {
     return localStorage.getItem(key)
   } catch {
     return null
+  }
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const value = readStored(key)
+    return value ? (JSON.parse(value) as T) : fallback
+  } catch {
+    return fallback
   }
 }
 
@@ -190,6 +204,10 @@ export const useEditor = defineStore('editor', () => {
   const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
   const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
   const consoleOpen = ref(true)
+  const objectFilter = reactive<Partial<Record<NetObject, ObjectFilter>>>({})
+  const identified = shallowRef<(LatLon & { label: string }) | null>(null)
+  /** Куда пользователь хотел перейти, пока не решил судьбу несохранённых правок. */
+  const leaveRequest = ref<EditMode | 'sim' | null>(null)
   const selectedLane = shallowRef<{ wayId: number; forward: boolean; lane: number; points: XY[] } | null>(null)
   const consoleLog = shallowRef<ConsoleEntry[]>([])
   const viewMode = ref<ViewMode>('engineering')
@@ -200,7 +218,34 @@ export const useEditor = defineStore('editor', () => {
   const speedStart = shallowRef<{ wayId: number; position: LatLon } | null>(null)
   const connectorFrom = shallowRef<{ node: number; neighbor: number; lane: number; points: XY[]; port?: XY } | null>(null)
   const mapBalance = ref(0.5)
-  const crs = ref<CrsId>((readStored(CRS_KEY) as CrsId | null) ?? 'wgs84')
+  const crs = ref<CrsId>(normalizeCrs(readStored(CRS_KEY) ?? 'wgs84'))
+  const crsDialogOpen = ref(false)
+  const recentCrs = ref<string[]>(readJson<string[]>(CRS_RECENT_KEY, []))
+  const customCrs = ref<CrsEntry[]>(readJson<CrsEntry[]>(CRS_CUSTOM_KEY, []))
+  setCustomCrs(customCrs.value)
+
+  function setCrs(id: string): void {
+    crs.value = id
+    recentCrs.value = [id, ...recentCrs.value.filter((item) => item !== id)].slice(0, CRS_RECENT_LIMIT)
+    writeStored(CRS_RECENT_KEY, JSON.stringify(recentCrs.value))
+  }
+
+  function storeCustomCrs(): void {
+    setCustomCrs(customCrs.value)
+    writeStored(CRS_CUSTOM_KEY, JSON.stringify(customCrs.value))
+  }
+
+  function addCustomCrs(name: string, def: string): string {
+    const id = `USER:${100000 + customCrs.value.length + 1}`
+    customCrs.value = [...customCrs.value, { id, name, group: 'Свои', def, custom: true }]
+    storeCustomCrs()
+    return id
+  }
+
+  function removeCustomCrs(id: string): void {
+    customCrs.value = customCrs.value.filter((entry) => entry.id !== id)
+    storeCustomCrs()
+  }
   const filterMode = ref<FilterMode>('hide')
   const filterLogic = ref<FilterLogic>('any')
   const trafficOptions = reactive({
@@ -512,8 +557,8 @@ export const useEditor = defineStore('editor', () => {
 
   function touch(): void {
     rev.value++
+    // Правки живут в браузере, пока их не сохранят кнопкой: случайная правка не попадёт в проект
     if (saveState.value !== 'saving') saveState.value = 'dirty'
-    scheduleSave()
     scheduleValidation()
   }
 
@@ -668,7 +713,44 @@ export const useEditor = defineStore('editor', () => {
     if (mode.value === 'insert') applyInsertTool()
   }
 
+  async function saveNow(): Promise<boolean> {
+    await flushSave()
+    if (saveState.value === 'saved') toast('Правки сохранены', 'success')
+    return saveState.value === 'saved'
+  }
+
+  function applyLeave(target: EditMode | 'sim'): void {
+    if (target === 'sim') viewMode.value = 'sim'
+    else setModeNow(target)
+  }
+
+  /** Выход из правки с несохранёнными изменениями требует явного решения. */
+  async function resolveLeave(action: 'save' | 'discard' | 'cancel'): Promise<void> {
+    const target = leaveRequest.value
+    leaveRequest.value = null
+    if (!target || action === 'cancel') return
+    if (action === 'save' && !(await saveNow())) return
+    if (action === 'discard' && projectId.value) {
+      await open(projectId.value)
+      toast('Несохранённые правки отменены')
+    }
+    applyLeave(target)
+  }
+
+  function enterSimulation(): void {
+    if (saveState.value === 'dirty') leaveRequest.value = 'sim'
+    else viewMode.value = 'sim'
+  }
+
   function setMode(next: EditMode): void {
+    if (next === 'select' && mode.value !== 'select' && saveState.value === 'dirty') {
+      leaveRequest.value = next
+      return
+    }
+    setModeNow(next)
+  }
+
+  function setModeNow(next: EditMode): void {
     if (next === 'insert') {
       applyInsertTool()
       return
@@ -685,14 +767,16 @@ export const useEditor = defineStore('editor', () => {
   function acceptsNode(id: number): boolean {
     const d = doc.value
     const node = d?.nodes.get(id)
-    if (!d || !node || objectLocked[activeObject.value]) return false
+    if (!d || !node || objectLocked[activeObject.value] || objectHidden[activeObject.value]) return false
+    if (!passesFilter(objectFilter[activeObject.value], node.tags)) return false
     if (activeObject.value === 'stops') return matchesNode('stopPoints', node, d) || matchesNode('stopAreas', node, d)
     return matchesNode(activeObject.value, node, d)
   }
 
   function acceptsWay(id: number): boolean {
     const way = doc.value?.ways.get(id)
-    if (!way || objectLocked[activeObject.value]) return false
+    if (!way || objectLocked[activeObject.value] || objectHidden[activeObject.value]) return false
+    if (!passesFilter(objectFilter[activeObject.value], way.tags)) return false
     return matchesWay(activeObject.value, way)
   }
 
@@ -1129,6 +1213,18 @@ export const useEditor = defineStore('editor', () => {
     objectHidden,
     objectLocked,
     consoleOpen,
+    crsDialogOpen,
+    recentCrs,
+    customCrs,
+    setCrs,
+    addCustomCrs,
+    removeCustomCrs,
+    objectFilter,
+    identified,
+    leaveRequest,
+    saveNow,
+    resolveLeave,
+    enterSimulation,
     selectedLane,
     pickLane,
     consoleLog,

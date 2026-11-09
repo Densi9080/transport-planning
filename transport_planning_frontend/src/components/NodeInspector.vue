@@ -89,7 +89,7 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
         <input id="node-lon" class="input" :value="node.lon.toFixed(7)" @change="setCoordinate('lon', $event)" />
       </div>
     </div>
-    <p v-if="editor.crs !== 'wgs84'" class="muted info">{{ formatPosition(node, editor.crs, editor.projector) }}</p>
+    <p v-if="editor.crs !== 'EPSG:4326'" class="muted info">{{ formatPosition(node, editor.crs, editor.projector) }}</p>
   </div>
 
   <div class="section">

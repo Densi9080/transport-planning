@@ -47,6 +47,29 @@ export function customObjectOf(tags: Tags | undefined): CustomObject | null {
   return CUSTOM_BY_VALUE.get(tags?.[TP_TYPE] ?? '') ?? null
 }
 
+export type FilterOp = 'eq' | 'ne' | 'has' | 'gt' | 'lt'
+
+export interface ObjectFilter {
+  enabled: boolean
+  key: string
+  op: FilterOp
+  value: string
+}
+
+/** Фильтр типа объектов, как значок фильтра в окне сети Visum. Неполный фильтр ничего не отсекает. */
+export function passesFilter(filter: ObjectFilter | undefined, tags: Tags | undefined): boolean {
+  if (!filter?.enabled || !filter.key.trim()) return true
+  const actual = tags?.[filter.key.trim()]
+  if (filter.op === 'has') return actual !== undefined
+  if (actual === undefined) return filter.op === 'ne'
+  if (filter.op === 'eq') return actual === filter.value.trim()
+  if (filter.op === 'ne') return actual !== filter.value.trim()
+  const left = Number.parseFloat(actual)
+  const right = Number.parseFloat(filter.value)
+  if (Number.isNaN(left) || Number.isNaN(right)) return false
+  return filter.op === 'gt' ? left > right : left < right
+}
+
 export function isCustomObject(type: NetObject): type is CustomObject {
   return type in CUSTOM_TYPES
 }

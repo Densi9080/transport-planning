@@ -1,3 +1,6 @@
+import proj4 from 'proj4'
+
+import { CRS_CATALOG, type CrsEntry, DMS_ID, LEGACY_CRS, LOCAL_ID, WGS84_ID } from './crsCatalog'
 import type { Projector } from './geo'
 import type { LatLon } from './types'
 
@@ -6,16 +9,51 @@ import type { LatLon } from './types'
  * как того требует формат OSM, поэтому выбор системы ничего не меняет в файле.
  */
 
-export type CrsId = 'wgs84' | 'dms' | 'utm' | 'gk42' | 'mercator' | 'local'
+export type CrsId = string
 
-export const CRS_OPTIONS: { id: CrsId; label: string; short: string }[] = [
-  { id: 'wgs84', label: 'WGS 84, градусы (EPSG:4326)', short: 'WGS 84' },
-  { id: 'dms', label: 'WGS 84, градусы и минуты', short: 'WGS 84 ГМС' },
-  { id: 'utm', label: 'UTM, WGS 84', short: 'UTM' },
-  { id: 'gk42', label: 'Пулково-42, Гаусс — Крюгер', short: 'СК-42' },
-  { id: 'mercator', label: 'Web Mercator (EPSG:3857)', short: 'Mercator' },
-  { id: 'local', label: 'Локальные метры от центра участка', short: 'Локальная' },
-]
+let customEntries: CrsEntry[] = []
+
+/** Свои системы хранятся в настройках браузера и подключаются сюда из хранилища редактора. */
+export function setCustomCrs(entries: CrsEntry[]): void {
+  customEntries = entries
+}
+
+export function normalizeCrs(id: string): string {
+  return LEGACY_CRS[id] ?? id
+}
+
+export function resolveCrs(id: string): CrsEntry | undefined {
+  const normal = normalizeCrs(id)
+  return CRS_CATALOG.find((entry) => entry.id === normal) ?? customEntries.find((entry) => entry.id === normal)
+}
+
+function isGeographic(def: string): boolean {
+  return /\+proj=(longlat|latlong)/.test(def) || /^\s*GEOG(CS|CRS)\[/i.test(def)
+}
+
+function isGaussKruger(id: string): boolean {
+  return /^EPSG:(284|200)\d\d$/.test(id)
+}
+
+const WGS84_DEF = '+proj=longlat +datum=WGS84 +no_defs'
+
+function formatProjected(point: LatLon, def: string, gaussKruger: boolean): string {
+  const [x, y] = proj4(WGS84_DEF, def).forward([point.lon, point.lat]) as [number, number]
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Преобразование не определено для этой точки')
+  if (isGeographic(def)) return `${y.toFixed(6)}, ${x.toFixed(6)}`
+  return gaussKruger ? `X ${y.toFixed(2)}  Y ${x.toFixed(2)}` : `E ${x.toFixed(2)}  N ${y.toFixed(2)}`
+}
+
+/** Проверяет параметры своей системы на реальной точке. */
+export function checkCrsDefinition(def: string, point: LatLon): { ok: boolean; text: string } {
+  const value = def.trim()
+  if (!value) return { ok: false, text: 'Введите строку PROJ или WKT' }
+  try {
+    return { ok: true, text: formatProjected(point, value, false) }
+  } catch (error) {
+    return { ok: false, text: `Параметры не распознаны: ${error instanceof Error ? error.message : String(error)}` }
+  }
+}
 
 interface Ellipsoid {
   a: number
@@ -142,10 +180,6 @@ function dms(value: number, positive: string, negative: string): string {
 
 export function formatPosition(point: LatLon, crs: CrsId, projector: Projector | null): string {
   switch (crs) {
-    case 'wgs84':
-      return `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`
-    case 'dms':
-      return `${dms(point.lat, ' с.ш.', ' ю.ш.')}, ${dms(point.lon, ' в.д.', ' з.д.')}`
     case 'utm': {
       const { zone, easting, northing } = toUtm(point)
       return `${zone}N  E ${easting.toFixed(2)}  N ${northing.toFixed(2)}`
@@ -158,10 +192,20 @@ export function formatPosition(point: LatLon, crs: CrsId, projector: Projector |
       const { x, y } = toWebMercator(point)
       return `X ${x.toFixed(2)}  Y ${y.toFixed(2)}`
     }
-    case 'local': {
-      if (!projector) return ''
-      const { x, y } = projector.toXY(point)
-      return `x ${x.toFixed(2)} м  y ${y.toFixed(2)} м`
-    }
+  }
+  const id = normalizeCrs(crs)
+  if (id === WGS84_ID) return `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`
+  if (id === DMS_ID) return `${dms(point.lat, ' с.ш.', ' ю.ш.')}, ${dms(point.lon, ' в.д.', ' з.д.')}`
+  if (id === LOCAL_ID) {
+    if (!projector) return ''
+    const { x, y } = projector.toXY(point)
+    return `x ${x.toFixed(2)} м  y ${y.toFixed(2)} м`
+  }
+  const entry = resolveCrs(id)
+  if (!entry?.def) return ''
+  try {
+    return formatProjected(point, entry.def, isGaussKruger(id))
+  } catch {
+    return 'вне области определения'
   }
 }

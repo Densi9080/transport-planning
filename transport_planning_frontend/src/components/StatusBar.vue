@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { CRS_OPTIONS, formatPosition } from '@/core/crs'
+import { formatPosition } from '@/core/crs'
 import { useEditor } from '@/stores/editor'
 
 const editor = useEditor()
@@ -23,6 +23,7 @@ const TOOL_HINTS: Record<string, string> = {
   lineStop: 'Щелчок по дороге создаёт остановку, по существующему узлу добавляет её в маршрут',
   object: 'Щелчок по дороге ставит объект активного типа. Insert возвращает к редактированию',
   stopPoint: 'Щелчок по дороге создаёт пункт остановки',
+  identify: 'Щелчок по карте показывает координаты и ссылку на Яндекс Карты',
   stopArea: 'Щелчок по карте создаёт зону остановки',
   stopGroup: 'Щелчок по пункту или зоне объединяет в остановку всё, что стоит рядом',
 }
@@ -75,9 +76,7 @@ const scale = computed(() => {
     <button v-if="editor.errorCount" class="cell link" @click="editor.consoleOpen = true">Ошибок {{ editor.errorCount }}</button>
     <span class="cell wide">{{ counts }}</span>
     <span class="cell mono">{{ position }}</span>
-    <select v-model="editor.crs" class="crs" aria-label="Система координат" title="Система координат">
-      <option v-for="option in CRS_OPTIONS" :key="option.id" :value="option.id">{{ option.short }}</option>
-    </select>
+    <button class="cell link crs-button" title="Выбрать систему координат" @click="editor.crsDialogOpen = true">{{ editor.crs }}</button>
     <span class="cell mono">{{ scale }}</span>
     <span class="cell mono">z{{ editor.zoom.toFixed(1) }}</span>
   </footer>

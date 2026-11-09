@@ -23,7 +23,7 @@ import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
-import { CUSTOM_TYPES, type CustomObject, customObjectOf, TP_TYPE } from '@/core/netObjects'
+import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE } from '@/core/netObjects'
 import type { LatLon, ONode, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
 import { CarLayer } from '@/map/carLayer'
@@ -323,10 +323,34 @@ function scheduleRender(): void {
   })
 }
 
+/** Пункты, зоны и остановки рисуются раздельно, чтобы скрывать их независимо друг от друга. */
+function stopObjectFeatures(): Feature[] {
+  const doc = editor.doc!
+  const features: Feature[] = []
+  for (const node of doc.nodes.values()) {
+    if (matchesNode('stopPoints', node, doc)) features.push(pointOf(node, { kind: 'point' }))
+    if (matchesNode('stopAreas', node, doc)) features.push(pointOf(node, { kind: 'area' }))
+  }
+  for (const way of doc.ways.values()) {
+    const node = way.tags?.public_transport === 'platform' ? doc.nodes.get(way.nds[0]!) : undefined
+    if (node) features.push(pointOf(node, { kind: 'area' }))
+  }
+  for (const relation of doc.relations.values()) {
+    if (relation.tags?.public_transport !== 'stop_area') continue
+    const nodes = relation.members.filter(([type, ref]) => type === 'node' && doc.nodes.has(ref)).map(([, ref]) => doc.node(ref))
+    if (nodes.length === 0) continue
+    const lat = nodes.reduce((sum, node) => sum + node.lat, 0) / nodes.length
+    const lon = nodes.reduce((sum, node) => sum + node.lon, 0) / nodes.length
+    features.push(pointOf({ lat, lon }, { kind: 'stop' }))
+  }
+  return features
+}
+
 function renderScene(): void {
   if (!ready || !editor.doc || !editor.projector || !map) return
   const { scene, network: laneNetwork } = buildScene(editor.doc, editor.projector)
   setData('laneLines', { type: 'FeatureCollection', features: laneLineFeatures(laneNetwork) })
+  setData('netStops', { type: 'FeatureCollection', features: stopObjectFeatures() })
   for (const feature of scene.labels.features) {
     const name = feature.properties?.name as string
     feature.properties = { ...feature.properties, image: ensureLabelImage(map, name, editor.theme) }
@@ -511,6 +535,7 @@ function renderOverlay(): void {
   for (const { node, type } of customNodes.value) {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
+  if (editor.identified) features.push(pointOf(editor.identified, { role: 'snap' }))
   if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
 
@@ -741,7 +766,6 @@ function finishBox(): void {
   const box = selectionBox.value
   boxStart = null
   selectionBox.value = null
-  map!.dragPan.enable()
   if (!box || (box.width < MIN_BOX_PX && box.height < MIN_BOX_PX)) return
   suppressClick = true
   setTimeout(() => (suppressClick = false), 0)
@@ -766,7 +790,6 @@ function onMouseDown(event: MapMouseEvent): void {
   if (editor.mode === 'select' && event.originalEvent.button === 0) {
     boxStart = { x: event.point.x, y: event.point.y }
     boxShift = event.originalEvent.shiftKey
-    map!.dragPan.disable()
     event.preventDefault()
     return
   }
@@ -777,7 +800,6 @@ function onMouseDown(event: MapMouseEvent): void {
       portDragging = true
       portMoved = false
       portCursor = null
-      map!.dragPan.disable()
       event.preventDefault()
       scheduleOverlay()
     }
@@ -802,7 +824,6 @@ function onMouseDown(event: MapMouseEvent): void {
     nodeId = hit.id
   }
   drag = { nodeId, moved: false, startPoint: { x: event.point.x, y: event.point.y }, snap: null }
-  map!.dragPan.disable()
   event.preventDefault()
 }
 
@@ -814,7 +835,6 @@ function onMouseUp(event: MapMouseEvent): void {
   if (portDragging) {
     portDragging = false
     portCursor = null
-    map!.dragPan.enable()
     suppressClick = true
     setTimeout(() => (suppressClick = false), 0)
     const target = portMoved ? portAt(event.lngLat) : null
@@ -825,7 +845,6 @@ function onMouseUp(event: MapMouseEvent): void {
   if (!drag) return
   const finished = drag
   drag = null
-  map!.dragPan.enable()
   const doc = editor.doc!
 
   if (!finished.moved) {
@@ -891,6 +910,13 @@ function onClick(event: MapMouseEvent): void {
           else editor.selectedLane = null
         }
       }
+      break
+    }
+    case 'identify': {
+      let label = 'Точка на карте'
+      if (hit?.kind === 'node') label = editor.doc!.node(hit.id).tags?.name ?? `Узел ${hit.id}`
+      else if (hit?.kind === 'way') label = editor.doc!.way(hit.id).tags?.name ?? `Отрезок ${hit.id}`
+      editor.identified = { ...position, label }
       break
     }
     case 'object':
@@ -1005,10 +1031,10 @@ function applyView(): void {
   const isSim = mode === 'sim'
   const lane = mode !== 'graph'
   const threeD = mode === '3d' || (isSim && sim.camera3d)
-  visible(ENGINEERING_LAYERS, lane)
+  visible(ENGINEERING_LAYERS, lane && !editor.objectHidden.links)
   visible(GRAPH_LAYERS, mode === 'graph')
   // В симуляции траектории поворотов только мешали бы видеть машины и пробки
-  visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths)
+  visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths && !editor.objectHidden.turns)
   visible(SIM_LAYERS, false)
   const macro = isSim && sim.level === 'macro'
   const micro = isSim && sim.level === 'micro'
@@ -1016,7 +1042,11 @@ function applyView(): void {
   visible(['sim-bars', 'sim-bar-labels'], macro && sim.macroView === 'bars')
   visible(['sim-od', 'sim-zones'], macro && sim.showDesire)
   visible(['sim-jams', 'sim-signals'], micro)
-  visible(['arrows'], lane && editor.layers.arrows)
+  visible(['arrows'], lane && editor.layers.arrows && !editor.objectHidden.links)
+  visible(['node-dots'], lane && !isSim && !editor.objectHidden.nodes)
+  visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
+  visible(['net-stop-area'], !isSim && !editor.objectHidden.stopAreas)
+  visible(['net-stop'], !isSim && !editor.objectHidden.stops)
   visible(['crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
   visible(['traffic-signs'], editor.layers.trafficSigns)
@@ -1382,6 +1412,32 @@ onMounted(() => {
   map = instance
   if (import.meta.env.DEV) (window as unknown as { __map: MlMap }).__map = instance
   instance.doubleClickZoom.disable()
+  // Левая кнопка занята правкой, карта двигается зажатым колёсиком, как в Visum и Vissim
+  instance.dragPan.disable()
+  let wheelPan: { x: number; y: number } | null = null
+  const canvasContainer = instance.getCanvasContainer()
+  canvasContainer.addEventListener('mousedown', (event) => {
+    if (event.button !== 1) return
+    event.preventDefault()
+    wheelPan = { x: event.clientX, y: event.clientY }
+    instance.getCanvas().style.cursor = 'grabbing'
+  })
+  const onWheelPanMove = (event: MouseEvent): void => {
+    if (!wheelPan) return
+    instance.panBy([wheelPan.x - event.clientX, wheelPan.y - event.clientY], { animate: false })
+    wheelPan = { x: event.clientX, y: event.clientY }
+  }
+  const onWheelPanEnd = (event: MouseEvent): void => {
+    if (event.button !== 1 || !wheelPan) return
+    wheelPan = null
+    instance.getCanvas().style.cursor = ''
+  }
+  window.addEventListener('mousemove', onWheelPanMove)
+  window.addEventListener('mouseup', onWheelPanEnd)
+  instance.once('remove', () => {
+    window.removeEventListener('mousemove', onWheelPanMove)
+    window.removeEventListener('mouseup', onWheelPanEnd)
+  })
   instance.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
   instance.addControl(new ScaleControl({ unit: 'metric', maxWidth: 140 }), 'bottom-left')
 
@@ -1535,6 +1591,11 @@ function renderTraffic(): void {
 
 watch(() => [traffic.result, traffic.visible], renderTraffic)
 watch(() => editor.selectedLane, () => scheduleOverlay())
+watch(() => editor.identified, () => scheduleOverlay())
+watch(() => ({ ...editor.objectHidden }), () => {
+  applyView()
+  scheduleOverlay()
+})
 watch(() => editor.mode, (mode) => {
   if (!map) return
   map.getCanvas().style.cursor = mode === 'select' || editor.tool !== 'select' ? 'crosshair' : ''

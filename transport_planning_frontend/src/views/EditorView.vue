@@ -5,8 +5,11 @@ import AppToolbar from '@/components/AppToolbar.vue'
 import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
 import ConsoleDock from '@/components/ConsoleDock.vue'
+import CrsDialog from '@/components/CrsDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
+import IdentifyCard from '@/components/IdentifyCard.vue'
+import SaveGuardDialog from '@/components/SaveGuardDialog.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
 import JunctionEditor from '@/components/JunctionEditor.vue'
 import LeftDock from '@/components/LeftDock.vue'
@@ -41,6 +44,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   l: 'bump',
   p: 'sign',
   q: 'connector',
+  i: 'identify',
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -69,9 +73,15 @@ function changeLanes(delta: number): void {
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
   // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
-  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen) return
+  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen) return
   const key = event.key.toLowerCase()
   const code = event.code
+
+  if ((event.ctrlKey || event.metaKey) && code === 'KeyS') {
+    event.preventDefault()
+    void editor.saveNow()
+    return
+  }
 
   if ((event.ctrlKey || event.metaKey) && (code === 'KeyZ' || code === 'KeyY')) {
     event.preventDefault()
@@ -241,6 +251,7 @@ watch(
             <CompareMap v-if="editor.compareOpen" />
             <TrafficOptions />
             <MapBalance />
+            <IdentifyCard />
             <ToolDock v-if="editor.viewMode !== 'sim'" />
             <div class="toasts" aria-live="polite">
               <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
@@ -256,6 +267,8 @@ watch(
       <StatusBar />
       <ExportDialog v-if="editor.exportOpen" />
       <HelpDialog v-if="editor.helpOpen" />
+      <SaveGuardDialog v-if="editor.leaveRequest" />
+      <CrsDialog v-if="editor.crsDialogOpen" />
       <JunctionEditor v-if="editor.junctionNode !== null" :key="editor.junctionNode" />
       <AssistantSettingsDialog v-if="assistant.settingsOpen" />
     </template>

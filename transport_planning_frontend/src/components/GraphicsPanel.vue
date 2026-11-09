@@ -2,7 +2,6 @@
 import { Columns2, ImageUp, Trash2 } from 'lucide-vue-next'
 import { ref } from 'vue'
 
-import { CRS_OPTIONS } from '@/core/crs'
 import { BASEMAP_OPTIONS } from '@/map/style'
 import { useEditor } from '@/stores/editor'
 
@@ -52,9 +51,7 @@ function onImage(event: Event): void {
 
   <section class="section">
     <div class="eyebrow">Система координат</div>
-    <select v-model="editor.crs" class="input" aria-label="Система координат">
-      <option v-for="option in CRS_OPTIONS" :key="option.id" :value="option.id">{{ option.label }}</option>
-    </select>
+    <button class="btn block" @click="editor.crsDialogOpen = true">{{ editor.crs }}: выбрать</button>
     <span class="faint note">Меняет только показ координат. В файле .osm они всегда в WGS 84.</span>
   </section>
 
