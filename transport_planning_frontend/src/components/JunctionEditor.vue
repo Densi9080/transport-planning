@@ -5,11 +5,12 @@ import { computed, onMounted, ref } from 'vue'
 import { useEditor } from '@/stores/editor'
 
 import JunctionSchematic from './JunctionSchematic.vue'
+import SignalCalcPanel from './SignalCalcPanel.vue'
 import SignalPlanEditor from './SignalPlanEditor.vue'
 
 const editor = useEditor()
 const dialog = ref<HTMLDialogElement | null>(null)
-const tab = ref(editor.junctionTab)
+const tab = ref<'lanes' | 'signal' | 'calc'>(editor.junctionTab)
 
 const nodeId = computed(() => editor.junctionNode!)
 
@@ -39,10 +40,12 @@ onMounted(() => dialog.value?.showModal())
     <div class="dock-tabs" role="tablist">
       <button role="tab" :class="{ active: tab === 'lanes' }" :aria-selected="tab === 'lanes'" @click="tab = 'lanes'">Полосы и повороты</button>
       <button role="tab" :class="{ active: tab === 'signal' }" :aria-selected="tab === 'signal'" @click="tab = 'signal'">Светофор и фазы</button>
+      <button role="tab" :class="{ active: tab === 'calc' }" :aria-selected="tab === 'calc'" @click="tab = 'calc'">Расчёт цикла</button>
     </div>
     <div class="content">
       <JunctionSchematic v-if="tab === 'lanes'" :node="nodeId" />
-      <SignalPlanEditor v-else :node="nodeId" />
+      <SignalPlanEditor v-else-if="tab === 'signal'" :node="nodeId" />
+      <SignalCalcPanel v-else :node="nodeId" />
     </div>
   </dialog>
 </template>

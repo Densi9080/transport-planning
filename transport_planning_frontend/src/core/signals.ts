@@ -13,6 +13,8 @@ export interface SignalPhase {
   green: number
   /** Манёвры, у которых зелёный: ключи из movementKey. */
   movements: string[]
+  /** Транспорт стоит, идут только пешеходы. */
+  pedestrian?: boolean
 }
 
 export interface SignalPlan {
@@ -47,6 +49,7 @@ export function parseSignalPlan(tags: Tags | undefined): SignalPlan | null {
       phases: value.phases.map((phase) => ({
         green: Math.max(1, Number(phase.green) || MIN_GREEN_S),
         movements: Array.isArray(phase.movements) ? phase.movements.map(String) : [],
+        ...(phase.pedestrian ? { pedestrian: true } : {}),
       })),
     }
   } catch {

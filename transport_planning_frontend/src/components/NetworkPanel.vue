@@ -166,6 +166,26 @@ const FILTER_OPS: { id: FilterOp; label: string }[] = [
   { id: 'has', label: 'есть' },
 ]
 
+const VALUE_LIST_LIMIT = 200
+
+/** Атрибуты, которые реально есть у объектов этого типа. */
+function filterKeys(id: NetObject): string[] {
+  const keys = new Set<string>()
+  for (const item of index.value[id]) for (const key of Object.keys(item.tags ?? {})) keys.add(key)
+  return [...keys].sort((a, b) => a.localeCompare(b))
+}
+
+function filterValues(id: NetObject): string[] {
+  const key = editor.objectFilter[id]?.key
+  if (!key) return []
+  const values = new Set<string>()
+  for (const item of index.value[id]) {
+    const value = item.tags?.[key]
+    if (value !== undefined) values.add(value)
+  }
+  return [...values].sort((a, b) => a.localeCompare(b, 'ru', { numeric: true })).slice(0, VALUE_LIST_LIMIT)
+}
+
 function toggleFilterEditor(id: NetObject): void {
   editor.objectFilter[id] ??= { enabled: false, key: '', op: 'eq', value: '' }
   openFilter.value = openFilter.value === id ? null : id
@@ -252,11 +272,17 @@ function isSelected(item: Item): boolean {
           <div v-if="openFilter === row.id && editor.objectFilter[row.id]" class="filter-box">
             <div class="filter-title">Фильтр: {{ row.label }}</div>
             <div class="filter-row">
-              <input v-model="editor.objectFilter[row.id]!.key" class="input" placeholder="Атрибут, например lanes" aria-label="Атрибут" />
+              <select v-model="editor.objectFilter[row.id]!.key" class="input" aria-label="Атрибут">
+                <option value="">Атрибут…</option>
+                <option v-for="key in filterKeys(row.id)" :key="key" :value="key">{{ key }}</option>
+              </select>
               <select v-model="editor.objectFilter[row.id]!.op" class="input op" aria-label="Условие">
                 <option v-for="op in FILTER_OPS" :key="op.id" :value="op.id">{{ op.label }}</option>
               </select>
-              <input v-model="editor.objectFilter[row.id]!.value" class="input" placeholder="Значение" aria-label="Значение" :disabled="editor.objectFilter[row.id]!.op === 'has'" />
+              <input v-model="editor.objectFilter[row.id]!.value" class="input" placeholder="Значение" aria-label="Значение" :list="`filter-values-${row.id}`" :disabled="editor.objectFilter[row.id]!.op === 'has'" />
+              <datalist :id="`filter-values-${row.id}`">
+                <option v-for="value in filterValues(row.id)" :key="value" :value="value" />
+              </datalist>
             </div>
             <label class="layer"><input v-model="editor.objectFilter[row.id]!.enabled" type="checkbox" /> Включить фильтр</label>
           </div>
@@ -421,7 +447,8 @@ section {
   gap: 3px;
   margin-bottom: 4px;
 }
-.filter-row input {
+.filter-row input,
+.filter-row select {
   flex: 1;
   min-width: 0;
 }
