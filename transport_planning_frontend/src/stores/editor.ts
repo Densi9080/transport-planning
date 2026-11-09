@@ -873,6 +873,7 @@ export const useEditor = defineStore('editor', () => {
   }
 
   function chooseObject(next: NetObject): void {
+    if (next === 'routes') layers.transit = true
     selectedTurn.value = null
     activeObject.value = next
     activeType.value = pickTypeOf(next)

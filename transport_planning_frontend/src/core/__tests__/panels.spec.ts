@@ -99,7 +99,7 @@ describe('типовые профили', () => {
 
   it('меняет профиль и сохраняет название', () => {
     const next = withPreset({ highway: 'residential', name: 'Ленина', lanes: '2', surface: 'asphalt' }, primary)
-    expect(next).toMatchObject({ highway: 'primary', name: 'Ленина', lanes: '6', maxspeed: '60', width: '21', surface: 'asphalt' })
+    expect(next).toMatchObject({ highway: 'primary', name: 'Ленина', lanes: '6', maxspeed: '70', width: '21', surface: 'asphalt' })
     expect(parseProfile(next).laneWidth).toBeCloseTo(3.5)
   })
 

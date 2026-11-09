@@ -529,6 +529,17 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-width': 1.5,
       'line-dasharray': [3, 2],
     } },
+    { id: 'overlay-selected-3d', type: 'fill-extrusion', source: 'overlay', filter: ['==', ['get', 'role'], 'selected-3d'], paint: {
+      'fill-extrusion-color': COLORS.select,
+      'fill-extrusion-base': ['get', 'base'],
+      'fill-extrusion-height': ['get', 'top'],
+      'fill-extrusion-opacity': 0.92,
+    } },
+    { id: 'net-stop-link', type: 'line', source: 'netStops', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'link'], paint: {
+      'line-color': '#60a5fa',
+      'line-width': 1.2,
+      'line-dasharray': [2, 2],
+    } },
     { id: 'overlay-band', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'band'], layout: { 'line-cap': 'round' }, paint: {
       'line-color': '#facc15',
       'line-width': 2,

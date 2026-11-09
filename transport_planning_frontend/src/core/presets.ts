@@ -6,6 +6,8 @@ export interface RoadPreset {
   group: string
   title: string
   summary: string
+  /** Откуда взяты параметры: норматив, расчётная скорость и допустимое число полос. */
+  norm?: string
   /** Поперечное сечение: число полос по направлениям и их ширина в метрах. */
   forward: number
   backward: number
@@ -48,19 +50,43 @@ const road = (
   }
 }
 
+const SP42 = 'СП 42.13330.2016, табл. 11.2'
+const GOST = 'ГОСТ Р 52398-2005, табл. 1, скорость по ПДД п. 10.3'
+const norm = (preset: RoadPreset, text: string): RoadPreset => ({ ...preset, norm: text })
+const CITY_ROADS = 'Магистральные городские дороги'
+const CITY_STREETS = 'Магистральные улицы общегородского значения'
+const DISTRICT = 'Магистральные улицы и дороги районного значения'
+const LOCAL = 'Улицы и дороги местного значения'
+const OUTER = 'Внешние автомобильные дороги'
+const OTHER = 'Съезды, жилые зоны и проезды'
+
+// Разрешённая скорость по примечанию 2 к табл. 11.2: на 10 км/ч ниже расчётной
 export const ROAD_PRESETS: RoadPreset[] = [
-  road('primary-8', 'Магистрали', 'Магистраль, 8 полос', 4, 4, 3.75, 80, 'primary'),
-  road('primary-6', 'Магистрали', 'Магистраль, 6 полос', 3, 3, 3.5, 60, 'primary'),
-  road('primary-4', 'Магистрали', 'Магистраль, 4 полосы', 2, 2, 3.5, 60, 'primary'),
-  road('primary-oneway', 'Магистрали', 'Магистраль, одна сторона', 3, 0, 3.5, 60, 'primary'),
-  road('primary-link', 'Магистрали', 'Съезд с магистрали', 1, 0, 4, 40, 'primary_link'),
-  road('secondary-4', 'Улицы', 'Районная, 4 полосы', 2, 2, 3.5, 60, 'secondary'),
-  road('secondary-2', 'Улицы', 'Районная, 2 полосы', 1, 1, 3.5, 60, 'secondary'),
-  road('tertiary', 'Улицы', 'Местная улица', 1, 1, 3.25, 40, 'tertiary'),
-  road('residential', 'Улицы', 'Жилая улица', 1, 1, 3, 40, 'residential'),
-  road('living', 'Проезды', 'Жилая зона', 1, 1, 2.75, 20, 'living_street'),
-  road('service', 'Проезды', 'Проезд', 1, 1, 2.75, 20, 'service'),
-  road('service-oneway', 'Проезды', 'Проезд односторонний', 1, 0, 3.5, 20, 'service'),
+  norm(road('city-road-1', CITY_ROADS, 'Дорога 1-го класса, скоростное движение', 3, 3, 3.75, 120, 'motorway'), `Vрасч 130, полоса 3,50–3,75 м, 4–10 полос. ${SP42}`),
+  norm(road('city-road-2', CITY_ROADS, 'Дорога 2-го класса, регулируемое движение', 2, 2, 3.75, 80, 'trunk'), `Vрасч 90, полоса 3,50–3,75 м, 4–8 полос. ${SP42}`),
+  norm(road('city-street-1', CITY_STREETS, 'Улица 1-го класса, непрерывное движение', 3, 3, 3.75, 80, 'trunk'), `Vрасч 90, полоса 3,50–3,75 м, 4–10 полос. ${SP42}`),
+  norm(road('primary-6', CITY_STREETS, 'Улица 2-го класса, 6 полос', 3, 3, 3.5, 70, 'primary'), `Vрасч 80, полоса 3,25–3,75 м, 4–10 полос. ${SP42}`),
+  norm(road('primary-4', CITY_STREETS, 'Улица 2-го класса, 4 полосы', 2, 2, 3.5, 70, 'primary'), `Vрасч 80, полоса 3,25–3,75 м, 4–10 полос. ${SP42}`),
+  norm(road('city-street-3', CITY_STREETS, 'Улица 3-го класса', 2, 2, 3.5, 60, 'primary'), `Vрасч 70, полоса 3,25–3,75 м, 4–6 полос. ${SP42}`),
+  road('primary-oneway', CITY_STREETS, 'Улица, одна проезжая часть', 3, 0, 3.5, 60, 'primary'),
+  norm(road('secondary-4', DISTRICT, 'Улица районного значения, 4 полосы', 2, 2, 3.5, 60, 'secondary'), `Vрасч 70, полоса 3,25–3,75 м, 2–4 полосы. ${SP42}`),
+  norm(road('secondary-2', DISTRICT, 'Улица районного значения, 2 полосы', 1, 1, 3.5, 60, 'secondary'), `Vрасч 70, полоса 3,25–3,75 м, 2–4 полосы. ${SP42}`),
+  norm(road('district-road', DISTRICT, 'Дорога районного значения', 1, 1, 3.5, 60, 'secondary'), `Vрасч 70, полоса 3,25–3,75 м, 2–4 полосы. ${SP42}`),
+  norm(road('residential', LOCAL, 'Улица в жилой застройке', 1, 1, 3.25, 40, 'residential'), `Vрасч 50, полоса 3,0–3,5 м, 2–4 полосы. ${SP42}`),
+  norm(road('tertiary', LOCAL, 'Улица в общественно-деловой зоне', 1, 1, 3.25, 40, 'tertiary'), `Vрасч 50, полоса 3,0–3,5 м, 2–4 полосы. ${SP42}`),
+  norm(road('industrial', LOCAL, 'Улица или дорога в производственной зоне', 1, 1, 3.5, 40, 'unclassified'), `Vрасч 50, полоса 3,5 м, 2–4 полосы. ${SP42}`),
+  norm(road('outer-1a', OUTER, 'Автомагистраль, категория IА', 2, 2, 3.75, 110, 'motorway'), `4 полосы и более, 3,75 м. ${GOST}`),
+  norm(road('outer-1b', OUTER, 'Скоростная дорога, категория IБ', 2, 2, 3.75, 90, 'trunk'), `4 полосы и более, 3,75 м. ${GOST}`),
+  norm(road('outer-1v', OUTER, 'Дорога обычного типа, категория IВ', 2, 2, 3.75, 90, 'trunk'), `4 полосы и более, 3,75 м. ${GOST}`),
+  norm(road('outer-2', OUTER, 'Дорога категории II, 4 полосы', 2, 2, 3.5, 90, 'primary'), `4 полосы, 3,5 м. ${GOST}`),
+  norm(road('outer-2-narrow', OUTER, 'Дорога категории II, 2 полосы', 1, 1, 3.75, 90, 'primary'), `2 полосы, 3,75 м. ${GOST}`),
+  norm(road('outer-3', OUTER, 'Дорога категории III', 1, 1, 3.5, 90, 'secondary'), `2 полосы, 3,5 м. ${GOST}`),
+  norm(road('outer-4', OUTER, 'Дорога категории IV', 1, 1, 3, 90, 'tertiary'), `2 полосы, 3,0 м. ${GOST}`),
+  norm(road('outer-5', OUTER, 'Дорога категории V', 1, 0, 4.5, 90, 'unclassified', { oneway: 'no' }), `1 полоса, не менее 4,5 м. ${GOST}`),
+  road('primary-link', OTHER, 'Съезд с магистрали', 1, 0, 4, 40, 'primary_link'),
+  road('living', OTHER, 'Жилая зона', 1, 1, 2.75, 20, 'living_street'),
+  road('service', OTHER, 'Проезд', 1, 1, 2.75, 20, 'service'),
+  road('service-oneway', OTHER, 'Проезд односторонний', 1, 0, 3.5, 20, 'service'),
 ]
 
 export const DEFAULT_PRESET_ID = 'residential'
@@ -113,15 +139,18 @@ export function matchingPreset(tags: Tags): RoadPreset | undefined {
 }
 
 export const ROAD_TYPES: { value: string; label: string }[] = [
-  { value: 'motorway', label: 'Автомагистраль' },
-  { value: 'trunk', label: 'Скоростная' },
-  { value: 'primary', label: 'Магистраль' },
-  { value: 'secondary', label: 'Районная' },
-  { value: 'tertiary', label: 'Местная' },
-  { value: 'unclassified', label: 'Без категории' },
-  { value: 'residential', label: 'Жилая' },
+  { value: 'motorway', label: 'Автомагистраль, магистральная дорога 1-го класса' },
+  { value: 'trunk', label: 'Скоростная дорога, магистральная дорога 2-го класса' },
+  { value: 'primary', label: 'Магистральная улица общегородского значения' },
+  { value: 'secondary', label: 'Магистральная улица районного значения' },
+  { value: 'tertiary', label: 'Улица местного значения, общественно-деловая' },
+  { value: 'unclassified', label: 'Улица или дорога в производственной зоне' },
+  { value: 'residential', label: 'Улица в жилой застройке' },
   { value: 'living_street', label: 'Жилая зона' },
   { value: 'service', label: 'Проезд' },
+  { value: 'pedestrian', label: 'Пешеходная улица' },
+  { value: 'motorway_link', label: 'Съезд с автомагистрали' },
+  { value: 'trunk_link', label: 'Съезд со скоростной дороги' },
   { value: 'primary_link', label: 'Съезд с магистрали' },
   { value: 'secondary_link', label: 'Съезд с районной' },
   { value: 'tertiary_link', label: 'Съезд с местной' },

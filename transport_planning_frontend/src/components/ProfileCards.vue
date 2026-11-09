@@ -38,6 +38,7 @@ function widths(count: number, width: number): number[] {
         <CrossSection :forward="widths(preset.forward, preset.laneWidth)" :backward="widths(preset.backward, preset.laneWidth)" />
         <strong>{{ preset.title }}</strong>
         <span class="faint">{{ preset.summary }}</span>
+        <span v-if="preset.norm" class="faint norm">{{ preset.norm }}</span>
       </button>
     </div>
   </div>
@@ -72,6 +73,9 @@ function widths(count: number, width: number): number[] {
 .card.active {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+.norm {
+  font-size: 10px;
 }
 .card strong {
   font-size: 12px;

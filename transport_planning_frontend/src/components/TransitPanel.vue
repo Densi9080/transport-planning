@@ -3,6 +3,7 @@ import { BusFront, MapPinPlus, Plus, Search, Trash2, X } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
 import { DEFAULT_INTERVAL_MIN, TRANSIT_MODE_LABELS, type TransitMode } from '@/core/transit'
+import { computeRoute, DEFAULT_DWELL_S, groupLines, oppositeRoute, routeParams, writeProfileValue } from '@/core/transitCalc'
 import { useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
 
@@ -25,6 +26,44 @@ const visible = computed(() => {
 })
 
 const line = computed(() => editor.selectedLine)
+const groups = computed(() => groupLines(visible.value))
+
+const route = computed(() => {
+  void editor.rev
+  const current = line.value
+  if (!current || !editor.doc || !editor.projector) return null
+  return computeRoute(editor.doc, editor.projector, current, oppositeRoute(current, editor.lines))
+})
+const params = computed(() => (line.value ? routeParams(line.value) : null))
+
+const PARAM_FIELDS: { key: string; label: string; field: 'speedKmh' | 'vehicleCapacity' | 'layoverMin' | 'hoursPerDay' }[] = [
+  { key: 'tp:speed', label: 'Скорость на перегоне, км/ч', field: 'speedKmh' },
+  { key: 'tp:vehcap', label: 'Вместимость машины, чел.', field: 'vehicleCapacity' },
+  { key: 'tp:layover', label: 'Отстой на конечной, мин', field: 'layoverMin' },
+  { key: 'tp:hours', label: 'Часов работы в сутки', field: 'hoursPerDay' },
+]
+
+function setParam(key: string, event: Event): void {
+  if (!line.value) return
+  const value = (event.target as HTMLInputElement).value.trim()
+  const tags = { ...line.value.tags }
+  if (value && Number(value) > 0) tags[key] = value
+  else delete tags[key]
+  editor.updateLineTags(line.value.id, tags, 'Параметры маршрута')
+}
+
+function setProfile(key: 'tp:run' | 'tp:dwell', index: number, event: Event, scale: number): void {
+  if (!line.value || !route.value) return
+  const raw = (event.target as HTMLInputElement).value.trim()
+  const value = raw === '' ? null : Math.max(0, Number(raw) * scale)
+  if (value !== null && !Number.isFinite(value)) return
+  editor.updateLineTags(line.value.id, writeProfileValue(line.value.tags, key, index, value, route.value.profile.length), 'Профиль времени')
+}
+
+function clock(seconds: number): string {
+  const total = Math.round(seconds)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
 
 const lineResult = computed(() => {
   const id = editor.selectedLineId
@@ -114,17 +153,24 @@ function deleteSelected(): void {
   </section>
 
   <section class="list" aria-label="Маршруты">
-    <button
-      v-for="item in visible"
-      :key="item.id"
-      class="line-row"
-      :class="{ active: editor.selectedLineId === item.id }"
-      :aria-pressed="editor.selectedLineId === item.id"
-      @click="editor.focusLine(item.id)"
-    >
-      <span class="chip" :style="{ background: item.color }">{{ item.ref || '—' }}</span>
-      <span class="ellipsis">{{ item.from && item.to ? `${item.from} — ${item.to}` : item.name }}</span>
-    </button>
+    <div v-for="group in groups" :key="group.key" class="line-group">
+      <div class="line-head">
+        <span class="chip" :style="{ background: group.color }">{{ group.ref || '—' }}</span>
+        <span class="ellipsis">{{ TRANSIT_MODE_LABELS[group.mode] }}</span>
+        <span class="faint count">направлений {{ group.routes.length }}</span>
+      </div>
+      <button
+        v-for="(item, index) in group.routes"
+        :key="item.id"
+        class="line-row"
+        :class="{ active: editor.selectedLineId === item.id }"
+        :aria-pressed="editor.selectedLineId === item.id"
+        @click="editor.focusLine(item.id)"
+      >
+        <span class="direction" aria-hidden="true">{{ index === 0 ? '→' : '←' }}</span>
+        <span class="ellipsis">{{ item.from && item.to ? `${item.from} → ${item.to}` : item.name }}</span>
+      </button>
+    </div>
     <p v-if="visible.length === 0" class="empty">Маршрутов не найдено</p>
   </section>
 
@@ -162,6 +208,41 @@ function deleteSelected(): void {
       </template>
     </dl>
 
+    <template v-if="route && params">
+      <h3 class="head">Показатели</h3>
+      <dl>
+        <div><dt>Длина по пунктам</dt><dd>{{ (route.lengthM / 1000).toFixed(2) }} км</dd></div>
+        <div><dt>Время рейса</dt><dd>{{ clock(route.totalS) }}</dd></div>
+        <div><dt>Скорость сообщения</dt><dd>{{ route.commercialKmh.toFixed(1) }} км/ч</dd></div>
+        <div><dt>Рейсов в час</dt><dd>{{ route.tripsPerHour.toFixed(1) }}</dd></div>
+        <div><dt>Провозная способность</dt><dd>{{ Math.round(route.capacityPerHour) }} чел/ч</dd></div>
+        <div><dt>Оборотный рейс</dt><dd>{{ clock(route.roundTripS) }}{{ route.hasOpposite ? '' : ', встречного нет: принято то же время' }}</dd></div>
+        <div><dt>Машин на линии</dt><dd>{{ route.vehicles }}</dd></div>
+        <div><dt>Рейсов в сутки</dt><dd>{{ Math.round(route.tripsPerDay) }}</dd></div>
+        <div><dt>Пробег в сутки</dt><dd>{{ Math.round(route.vehicleKmPerDay) }} км</dd></div>
+      </dl>
+      <div class="grid-2">
+        <div v-for="item in PARAM_FIELDS" :key="item.key" class="field">
+          <label>{{ item.label }}</label>
+          <input class="input" type="number" min="0" :value="params[item.field]" @change="setParam(item.key, $event)" />
+        </div>
+      </div>
+      <h3 class="head">Профиль времени</h3>
+      <table class="profile">
+        <thead><tr><th>№</th><th>Пункт</th><th>км</th><th>Ход, с</th><th>Стоянка, с</th><th>Время</th></tr></thead>
+        <tbody>
+          <tr v-for="(point, index) in route.profile" :key="`${point.node}-${index}`">
+            <td>{{ index + 1 }}</td>
+            <td class="name"><button class="link ellipsis" @click="editor.focusNode(point.node)">{{ point.name }}</button></td>
+            <td>{{ (point.distanceM / 1000).toFixed(2) }}</td>
+            <td><input v-if="index > 0" class="input" type="number" min="0" :value="Math.round(point.runS)" :class="{ tagged: point.runTagged }" @change="setProfile('tp:run', index, $event, 1)" /></td>
+            <td><input v-if="index > 0 && index < route.profile.length - 1" class="input" type="number" min="0" :value="point.dwellS" :placeholder="String(DEFAULT_DWELL_S)" @change="setProfile('tp:dwell', index, $event, 1)" /></td>
+            <td>{{ clock(point.arrivalS) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
+
     <div class="grid-2">
       <button class="btn small" :class="{ on: editor.tool === 'lineWay' }" :aria-pressed="editor.tool === 'lineWay'" @click="toggleTool('lineWay')">
         <BusFront :size="12" aria-hidden="true" /> Добавить дороги
@@ -192,6 +273,54 @@ function deleteSelected(): void {
 <style scoped>
 .grow {
   flex: 1;
+}
+.line-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 1px;
+}
+.count {
+  margin-left: auto;
+  flex: none;
+}
+.direction {
+  flex: none;
+  width: 14px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.head {
+  margin: 8px 0 3px;
+  font-size: 12px;
+}
+.profile {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.profile th,
+.profile td {
+  padding: 2px 3px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.profile th {
+  color: var(--muted);
+  font-weight: 500;
+}
+.profile .name {
+  max-width: 92px;
+  white-space: normal;
+}
+.profile input {
+  width: 52px;
+  padding: 1px 3px;
+}
+.profile input.tagged {
+  border-color: var(--accent);
 }
 .create {
   display: flex;

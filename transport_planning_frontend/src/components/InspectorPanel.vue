@@ -3,6 +3,7 @@ import { Combine, Merge, Sparkles, Spline, Trash2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { customObjectOf } from '@/core/netObjects'
+import StopAreaInspector from './StopAreaInspector.vue'
 import { useAssistant } from '@/stores/assistant'
 import { useEditor } from '@/stores/editor'
 
@@ -46,6 +47,7 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
       <LaneSection :way="ways[0]!" />
       <WayInspector :key="ways[0]!.id" :way="ways[0]!" />
     </template>
+    <StopAreaInspector v-else-if="isSingleNode && nodes[0]!.tags?.public_transport === 'platform'" :key="`area${nodes[0]!.id}`" :node="nodes[0]!" />
     <NetObjectInspector v-else-if="isSingleNode && customObjectOf(nodes[0]!.tags)" :key="`object${nodes[0]!.id}`" :node="nodes[0]!" />
     <NodeInspector v-else-if="isSingleNode" :key="nodes[0]!.id" :node="nodes[0]!" />
     <div v-else-if="isMulti" class="section">

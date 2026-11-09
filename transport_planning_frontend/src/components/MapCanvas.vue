@@ -15,7 +15,8 @@ import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import type { Feature, FeatureCollection } from 'geojson'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, sub, unit } from '@/core/geo'
+import type { OsmDoc } from '@/core/doc'
+import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, type Projector, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
 import type { LanePort } from '@/core/lanePick'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
@@ -23,6 +24,8 @@ import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
+import { stopPointOfArea } from '@/core/transitCalc'
+import { wayHeights } from '@/core/elevation'
 import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE } from '@/core/netObjects'
 import type { LatLon, ONode, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
@@ -51,6 +54,11 @@ import { useTraffic } from '@/stores/traffic'
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+const PITCH_3D = 5
+const SELECT_LIFT_M = 0.3
+const SELECT_HEIGHT_M = 0.8
+const MIN_SELECT_HALF_M = 1.5
+const NODE_SELECT_M = 3
 const CIRCLE_POINTS = 72
 /** Выше этой отметки машина уже на мосту и должна быть видна поверх него. */
 const BRIDGE_CAR_Z_M = 1.5
@@ -333,12 +341,20 @@ function scheduleRender(): void {
 }
 
 /** Пункты, зоны и остановки рисуются раздельно, чтобы скрывать их независимо друг от друга. */
+function lineLngLat(coordinates: number[][], properties: Record<string, unknown>): Feature {
+  return { type: 'Feature', properties, geometry: { type: 'LineString', coordinates } }
+}
+
 function stopObjectFeatures(): Feature[] {
   const doc = editor.doc!
   const features: Feature[] = []
   for (const node of doc.nodes.values()) {
     if (matchesNode('stopPoints', node, doc)) features.push(pointOf(node, { kind: 'point' }))
-    if (matchesNode('stopAreas', node, doc)) features.push(pointOf(node, { kind: 'area' }))
+    if (matchesNode('stopAreas', node, doc)) {
+      features.push(pointOf(node, { kind: 'area' }))
+      const bound = stopPointOfArea(doc, editor.projector!, node)
+      if (bound) features.push(lineLngLat([[node.lon, node.lat], [bound.node.lon, bound.node.lat]], { kind: 'link' }))
+    }
   }
   for (const way of doc.ways.values()) {
     const node = way.tags?.public_transport === 'platform' ? doc.nodes.get(way.nds[0]!) : undefined
@@ -545,6 +561,7 @@ function renderOverlay(): void {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
   renderSelectShapes(features)
+  if (map.getPitch() > PITCH_3D) renderSelected3d(features, doc, projector)
   const turnView = editor.turnPreview
   if (turnView) {
     for (const path of turnView.paths) features.push(lineOf(path, { role: 'turn-selected' }))
@@ -641,6 +658,27 @@ function editLabels(): { x: number; y: number; text: string }[] {
   }
   if (editor.tool === 'crossing' && editor.crossingStart && leash) labels.push(segmentLabel(projector.toXY(editor.crossingStart), leash.cursor))
   return labels
+}
+
+/** На наклонной карте выбор виден объёмом: плоская линия теряется среди домов и настилов мостов. */
+function renderSelected3d(features: Feature[], doc: OsmDoc, projector: Projector): void {
+  const ribbon = (points: XY[], halfWidth: number, z: number): void => {
+    const left = offsetPolyline(points, halfWidth)
+    const right = offsetPolyline(points, -halfWidth)
+    const ring = [...left, ...[...right].reverse()].map((point) => projector.toLngLat(point))
+    ring.push(ring[0]!)
+    features.push({ type: 'Feature', properties: { role: 'selected-3d', base: z + SELECT_LIFT_M, top: z + SELECT_LIFT_M + SELECT_HEIGHT_M }, geometry: { type: 'Polygon', coordinates: [ring] } })
+  }
+  for (const way of editor.selectedWays) {
+    const entry = wayCache.get(way.id)
+    if (!entry) continue
+    const heights = wayHeights(doc, way)
+    ribbon(entry.points, Math.max(entry.half, MIN_SELECT_HALF_M), Math.max(0, ...heights.values()))
+  }
+  for (const node of editor.selectedNodes) {
+    const center = projector.toXY(node)
+    ribbon([{ x: center.x - NODE_SELECT_M, y: center.y }, { x: center.x + NODE_SELECT_M, y: center.y }], NODE_SELECT_M, 0)
+  }
 }
 
 function selectAreaFeature(points: XY[]): Feature {
@@ -1027,6 +1065,13 @@ function onClick(event: MapMouseEvent): void {
     case 'select': {
       if (hit?.kind === 'mid') return
       const isSim = editor.viewMode === 'sim'
+      if (editor.activeObject === 'routes' && !isSim) {
+        const { x, y } = event.point
+        const route = map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['transit-selected', 'transit-all'] })[0]
+        const id = route?.properties?.line as number | undefined
+        if (id !== undefined) editor.selectLine(id)
+        return
+      }
       if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
         const { x, y } = event.point
         const turn = map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] })[0]
@@ -1210,7 +1255,7 @@ function applyView(): void {
   m.setLayerZoomRange('markings-lane', 16, markTop)
   m.setLayerZoomRange('markings-lane-solid', 15.5, markTop)
   visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
-  visible(['net-stop-area'], !isSim && !editor.objectHidden.stopAreas)
+  visible(['net-stop-area', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
   visible(['net-stop'], !isSim && !editor.objectHidden.stops)
   visible(['crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
