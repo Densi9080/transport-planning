@@ -2,6 +2,7 @@
 import { ArrowLeftRight, Minus, Plus, Scissors, Sparkles, Trash2 } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
+import { applyElevationRamp, clearElevation, maxSlopePercent, wayHeights } from '@/core/elevation'
 import { polylineLength } from '@/core/geo'
 import { isOneway, parseProfile, totalWidth, withLanes } from '@/core/lanes'
 import { ROAD_TYPES, TYPE_DEFAULTS } from '@/core/presets'
@@ -31,6 +32,41 @@ const lengthM = computed(() => {
     .map((node) => projector.toXY(node))
   return polylineLength(points)
 })
+
+const heights = computed(() => {
+  void editor.rev
+  const doc = editor.doc
+  if (!doc) return { start: 0, end: 0, hasEle: false }
+  const map = wayHeights(doc, props.way)
+  return {
+    start: map.get(props.way.nds[0]!) ?? 0,
+    end: map.get(props.way.nds.at(-1)!) ?? 0,
+    hasEle: props.way.nds.some((id) => doc.nodes.get(id)?.tags?.ele !== undefined),
+  }
+})
+const rampStart = ref(0)
+const rampEnd = ref(5.5)
+const slope = computed(() => {
+  void editor.rev
+  const doc = editor.doc
+  const projector = editor.projector
+  return doc && projector ? maxSlopePercent(doc, props.way, projector) : 0
+})
+
+function applyRamp(): void {
+  const from = Number(rampStart.value)
+  const to = Number(rampEnd.value)
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    editor.toast('Высота должна быть числом', 'error')
+    return
+  }
+  editor.mutate('Плавный переход по Z', (doc, projector) => applyElevationRamp(doc, projector, props.way.id, from, to))
+  editor.toast('Высоты записаны в теги ele узлов', 'success')
+}
+
+function resetRamp(): void {
+  editor.mutate('Сброс высот', (doc) => clearElevation(doc, props.way.id))
+}
 
 const structure = computed<'none' | 'bridge' | 'tunnel'>(() => {
   if (tags.value.bridge && tags.value.bridge !== 'no') return 'bridge'
@@ -234,6 +270,26 @@ function changeLayer(delta: number): void {
     </div>
 
     <div class="section">
+      <div class="eyebrow">Плавный переход по высоте (Z)</div>
+      <div class="grid-2">
+        <div class="field">
+          <label for="ramp-start">Начало, м</label>
+          <input id="ramp-start" v-model.number="rampStart" class="input" type="number" step="0.5" />
+        </div>
+        <div class="field">
+          <label for="ramp-end">Конец, м</label>
+          <input id="ramp-end" v-model.number="rampEnd" class="input" type="number" step="0.5" />
+        </div>
+      </div>
+      <button class="btn block small" @click="applyRamp">Построить плавный переход</button>
+      <p class="muted info">
+        Сейчас: {{ heights.start.toFixed(1) }} → {{ heights.end.toFixed(1) }} м, уклон до {{ slope.toFixed(1) }}%.
+        <span v-if="slope > 12" class="warn">Круто для автомобильной дороги.</span>
+      </p>
+      <button v-if="heights.hasEle" class="btn block small" @click="resetRamp">Сбросить высоты</button>
+    </div>
+
+    <div class="section">
       <button class="btn block small" @click="editor.setTool('split')">
         <Scissors :size="13" aria-hidden="true" /> Разрезать дорогу <kbd>X</kbd>
       </button>
@@ -294,6 +350,13 @@ h2 {
   margin: 0;
   color: #fcd34d;
   font-size: 12px;
+}
+.info {
+  margin: 0;
+  font-size: 12px;
+}
+.warn {
+  color: #fcd34d;
 }
 .tabs {
   display: flex;

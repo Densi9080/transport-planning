@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Box,
+  CarFront,
   CircleHelp,
   Cloud,
   CloudAlert,
@@ -23,6 +24,7 @@ const modes: { id: ViewMode; label: string; icon: typeof Box }[] = [
   { id: 'engineering', label: 'Инженерия', icon: PencilRuler },
   { id: 'graph', label: 'Граф', icon: Network },
   { id: '3d', label: '3D', icon: Box },
+  { id: 'sim', label: 'Симуляция', icon: CarFront },
 ]
 
 const saveLabel = computed(() => {

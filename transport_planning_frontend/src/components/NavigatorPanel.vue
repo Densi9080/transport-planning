@@ -4,7 +4,8 @@ import { computed, reactive, ref } from 'vue'
 
 import { isDrivable } from '@/core/lanes'
 import { ISSUE_TITLES, type Issue, type IssueCode } from '@/core/validate'
-import { COLORS } from '@/map/style'
+import { COLORS, LOS_COLORS } from '@/map/style'
+import { LOS_LABELS, LOS_TITLES } from '@/sim/macro'
 import { useEditor } from '@/stores/editor'
 
 const editor = useEditor()
@@ -191,6 +192,11 @@ const legend = [
         <div v-for="item in legend" :key="item.label" class="legend-row">
           <span class="swatch" :style="{ background: item.color }" aria-hidden="true" />
           {{ item.label }}
+        </div>
+        <div class="eyebrow legend-title">Загрузка дорог в симуляции</div>
+        <div v-for="(color, index) in LOS_COLORS" :key="color" class="legend-row">
+          <span class="swatch" :style="{ background: color }" aria-hidden="true" />
+          {{ LOS_LABELS[index] }}: {{ LOS_TITLES[index] }}
         </div>
         <p class="note faint">
           Траектории на перекрёстках построены из полос и запретов поворота. Симуляторы могут
@@ -397,6 +403,9 @@ const legend = [
   align-items: center;
   gap: 8px;
   padding: 5px 4px;
+}
+.legend-title {
+  margin: 10px 4px 2px;
 }
 .swatch {
   width: 22px;

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, reactive, ref, shallowRef } from 'vue'
+import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
@@ -23,11 +23,25 @@ import {
 import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
 import { buildNetwork } from '@/core/topology'
 import type { LatLon, Tags } from '@/core/types'
+import type { BasemapId } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 
 export type Tool = 'select' | 'node' | 'road' | 'split' | 'signal' | 'crossing' | 'bridge' | 'tunnel'
-export type ViewMode = 'engineering' | 'graph' | '3d'
-export type Basemap = 'none' | 'osm' | 'satellite'
+export type ViewMode = 'engineering' | 'graph' | '3d' | 'sim'
+export type Basemap = BasemapId
+
+export interface CameraState {
+  center: [number, number]
+  zoom: number
+  bearing: number
+  pitch: number
+}
+
+export interface ImageUnderlay {
+  url: string
+  /** Углы по часовой стрелке от верхнего левого: [долгота, широта]. */
+  corners: [[number, number], [number, number], [number, number], [number, number]]
+}
 export type DrawMode = 'polyline' | 'straight' | 'curve'
 export type SaveState = 'saved' | 'dirty' | 'saving' | 'error'
 
@@ -51,6 +65,23 @@ const AUTOSAVE_DELAY_MS = 800
 const VALIDATE_DELAY_MS = 350
 const TOAST_MS = 3500
 const WIDE_SCREEN_PX = 1100
+const TILE_URL_KEY = 'osm-editor-tile-url'
+
+function readStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Без браузерного хранилища настройка проживёт только до перезагрузки
+  }
+}
 
 export const useEditor = defineStore('editor', () => {
   const doc = shallowRef<OsmDoc | null>(null)
@@ -71,7 +102,14 @@ export const useEditor = defineStore('editor', () => {
   const drawPoints = shallowRef<DrawPoint[]>([])
 
   const basemap = ref<Basemap>('none')
-  const basemapOpacity = ref(0.65)
+  const basemapOpacity = ref(1)
+  const modelOpacity = ref(1)
+  const compareOpen = ref(false)
+  const customTileUrl = ref(readStored(TILE_URL_KEY) ?? '')
+  const imageUnderlay = shallowRef<ImageUnderlay | null>(null)
+  /** Положение основной карты: от него зависит карта рядом и начальное место снимка. */
+  const camera = shallowRef<CameraState | null>(null)
+  const cameraRequest = shallowRef<CameraState | null>(null)
   const layers = reactive({
     buildings: true,
     landuse: true,
@@ -97,6 +135,8 @@ export const useEditor = defineStore('editor', () => {
   const wideScreen = window.innerWidth >= WIDE_SCREEN_PX
   const navigatorOpen = ref(wideScreen)
   const inspectorOpen = ref(wideScreen)
+
+  watch(customTileUrl, (value) => writeStored(TILE_URL_KEY, value))
 
   const preset = computed(
     () => ROAD_PRESETS.find((item) => item.id === presetId.value) ?? ROAD_PRESETS[0]!,
@@ -164,6 +204,41 @@ export const useEditor = defineStore('editor', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  function setImageUnderlay(url: string): void {
+    const view = camera.value
+    const bounds = doc.value?.bounds
+    const lat = view?.center[1] ?? ((bounds?.minlat ?? 0) + (bounds?.maxlat ?? 0)) / 2
+    const lon = view?.center[0] ?? ((bounds?.minlon ?? 0) + (bounds?.maxlon ?? 0)) / 2
+    // Снимок сначала кладём в центр текущего вида: дальше его подгоняют за углы
+    const halfHeight = (360 / 2 ** (view?.zoom ?? 15)) * 0.5 * Math.cos((lat * Math.PI) / 180)
+    const halfWidth = 360 / 2 ** (view?.zoom ?? 15) * 0.6
+    imageUnderlay.value = {
+      url,
+      corners: [
+        [lon - halfWidth, lat + halfHeight],
+        [lon + halfWidth, lat + halfHeight],
+        [lon + halfWidth, lat - halfHeight],
+        [lon - halfWidth, lat - halfHeight],
+      ],
+    }
+  }
+
+  function moveImageCorner(index: number, lngLat: [number, number]): void {
+    const current = imageUnderlay.value
+    if (!current) return
+    const corners = [...current.corners] as ImageUnderlay['corners']
+    corners[index] = lngLat
+    imageUnderlay.value = { ...current, corners }
+  }
+
+  function clearImageUnderlay(): void {
+    imageUnderlay.value = null
+  }
+
+  function requestCamera(state: CameraState): void {
+    cameraRequest.value = state
   }
 
   function touch(): void {
@@ -493,6 +568,16 @@ export const useEditor = defineStore('editor', () => {
     drawPoints,
     basemap,
     basemapOpacity,
+    modelOpacity,
+    compareOpen,
+    customTileUrl,
+    imageUnderlay,
+    camera,
+    cameraRequest,
+    setImageUnderlay,
+    moveImageCorner,
+    clearImageUnderlay,
+    requestCamera,
     layers,
     issues,
     focusedIssue,

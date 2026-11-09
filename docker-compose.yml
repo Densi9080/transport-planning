@@ -1,0 +1,13 @@
+services:
+  editor:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Для доступа не только с этого компьютера задайте свой ключ
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-docker-key-change-me}
+    volumes:
+      - editor-data:/data
+
+volumes:
+  editor-data:

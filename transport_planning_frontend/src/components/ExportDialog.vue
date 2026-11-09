@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Download, FlaskConical, X } from 'lucide-vue
 import { computed, onMounted, ref } from 'vue'
 
 import { exportOsm, type PreflightResult, runPreflight } from '@/api'
+import { connectivityReport } from '@/core/validate'
 import { useEditor } from '@/stores/editor'
 
 const TEAM_KEY = 'osm-editor-team-file'
@@ -23,6 +24,25 @@ function readStoredName(): string | null {
 }
 
 const fileName = ref(readStoredName() ?? editor.projectName.replace(/\.osm$/i, '') + '_edited')
+
+const connectivity = computed(() => {
+  void editor.rev
+  return editor.doc ? connectivityReport(editor.doc) : null
+})
+/** Сохранить файл с ошибками можно, но только осознанно: от этого зависит допуск. */
+const acknowledged = ref(false)
+const needsAcknowledge = computed(() => counts.value.error > 0 || (connectivity.value ? !connectivity.value.ok : false))
+
+function showConnectivityProblems(): void {
+  const report = connectivity.value
+  if (!report) return
+  const first = report.isolatedWays[0] ?? report.oneDirectionWays[0]
+  if (first !== undefined) {
+    editor.select([...report.isolatedWays, ...report.oneDirectionWays].slice(0, 12).map((id) => ({ kind: 'way' as const, id })))
+    editor.focusOn(editor.doc!.node(editor.doc!.way(first).nds[0]!), 16.5)
+    close()
+  }
+}
 
 const counts = computed(() => {
   const result = { error: 0, warning: 0 }
@@ -111,6 +131,22 @@ onMounted(() => dialog.value?.showModal())
       </span>
     </div>
 
+    <div v-if="connectivity" class="status" :class="connectivity.ok ? 'good' : 'bad'">
+      <CheckCircle2 v-if="connectivity.ok" :size="15" aria-hidden="true" />
+      <AlertCircle v-else :size="15" aria-hidden="true" />
+      <span>
+        <strong>Связность графа.</strong>
+        Дорог: {{ connectivity.totalWays }}, связных групп: {{ connectivity.components }}.
+        <template v-if="connectivity.ok"> С любой дороги можно доехать до любой другой.</template>
+        <template v-else>
+          Вне основной сети: {{ connectivity.isolatedWays.length }}.
+          Без проезда в обе стороны: {{ connectivity.oneDirectionWays.length }}.
+          Дороги, обрезанные рамкой файла, тоже попадают сюда.
+          <button class="link" @click="showConnectivityProblems">Показать на карте</button>
+        </template>
+      </span>
+    </div>
+
     <div class="preflight">
       <button class="btn block" :disabled="checking" @click="check">
         <FlaskConical :size="14" aria-hidden="true" />
@@ -141,9 +177,14 @@ onMounted(() => dialog.value?.showModal())
 
     <p v-if="error" class="error" role="alert">{{ error }}</p>
 
+    <label v-if="needsAcknowledge" class="ack">
+      <input v-model="acknowledged" type="checkbox" />
+      Понимаю, что в графе остались ошибки, и всё равно сохраняю
+    </label>
+
     <div class="actions">
       <button class="btn" @click="close">Отмена</button>
-      <button class="btn primary" :disabled="busy" @click="download">
+      <button class="btn primary" :disabled="busy || (needsAcknowledge && !acknowledged)" @click="download">
         <Download :size="14" aria-hidden="true" />
         {{ busy ? 'Готовим файл…' : 'Сохранить файл' }}
       </button>
@@ -181,6 +222,23 @@ h2 {
 }
 .small {
   font-size: 12px;
+}
+.link {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--select);
+  text-decoration: underline;
+}
+.ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+}
+.ack input {
+  margin-top: 2px;
+  accent-color: var(--accent);
 }
 .status {
   display: flex;

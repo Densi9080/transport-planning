@@ -1,4 +1,5 @@
 import type { OsmDoc } from './doc'
+import { maxSlopePercent } from './elevation'
 import { dist, nearestOnSegment, Projector, segmentsCross } from './geo'
 import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
@@ -23,6 +24,7 @@ export type IssueCode =
   | 'restriction_detached'
   | 'duplicate_nodes'
   | 'no_lanes'
+  | 'steep_slope'
 
 export interface Issue {
   id: string
@@ -52,10 +54,12 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   restriction_detached: 'Запрет не касается дорог',
   duplicate_nodes: 'Узлы в одной точке',
   no_lanes: 'Не указано число полос',
+  steep_slope: 'Слишком крутой уклон',
 }
 
 const BROKEN_JUNCTION_M = 4
 const DUPLICATE_NODE_M = 0.5
+const MAX_SLOPE_PERCENT = 12
 const ROADS_REQUIRING_LANES = new Set(['primary', 'secondary', 'tertiary', 'trunk', 'motorway'])
 
 interface Segment {
@@ -108,6 +112,7 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkGeometry(context)
   checkSignals(context)
   checkRestrictions(context)
+  checkSlopes(context)
 
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   return context.issues.sort((a, b) => order[a.severity] - order[b.severity])
@@ -210,6 +215,22 @@ function checkTags({ doc, ways, issues }: Context): void {
         fix: () => setWayTags(doc, way.id, { ...way.tags, layer: up ? '1' : '-1' }),
       })
     }
+  }
+}
+
+function checkSlopes({ doc, projector, ways, issues }: Context): void {
+  for (const way of ways) {
+    const slope = maxSlopePercent(doc, way, projector)
+    if (slope <= MAX_SLOPE_PERCENT) continue
+    issues.push({
+      id: `slope-${way.id}`,
+      code: 'steep_slope',
+      severity: 'warning',
+      message: `${label(way)}: уклон ${slope.toFixed(1)}%. Удлините переход по высоте`,
+      position: wayPosition(doc, way),
+      wayIds: [way.id],
+      nodeIds: [],
+    })
   }
 }
 
@@ -567,5 +588,97 @@ function checkRestrictions({ doc, issues }: Context): void {
       wayIds: [from, to],
       nodeIds: [via],
     })
+  }
+}
+
+export interface ConnectivityReport {
+  /** Проезжих дорог всего. */
+  totalWays: number
+  /** Групп дорог, не связанных между собой. */
+  components: number
+  /** Дорог вне основной группы. */
+  isolatedWays: number[]
+  /** Дорог, с которых нельзя вернуться в основную сеть или попасть на них из неё. */
+  oneDirectionWays: number[]
+  ok: boolean
+}
+
+/** Проверка связности перед сохранением: и без учёта направлений, и с ними. */
+export function connectivityReport(doc: OsmDoc): ConnectivityReport {
+  const ways = [...doc.ways.values()].filter((way) => isDrivable(way.tags))
+  const forward = new Map<number, number[]>()
+  const backward = new Map<number, number[]>()
+  const undirected = new Map<number, number[]>()
+  const push = (map: Map<number, number[]>, from: number, to: number) => {
+    const list = map.get(from)
+    if (list) list.push(to)
+    else map.set(from, [to])
+  }
+  for (const way of ways) {
+    const profile = parseProfile(way.tags ?? {})
+    for (let i = 1; i < way.nds.length; i++) {
+      const a = way.nds[i - 1]!
+      const b = way.nds[i]!
+      push(undirected, a, b)
+      push(undirected, b, a)
+      if (profile.forward > 0) {
+        push(forward, a, b)
+        push(backward, b, a)
+      }
+      if (profile.backward > 0) {
+        push(forward, b, a)
+        push(backward, a, b)
+      }
+    }
+  }
+  const walk = (start: number, graph: Map<number, number[]>): Set<number> => {
+    const seen = new Set<number>([start])
+    const stack = [start]
+    while (stack.length > 0) {
+      for (const next of graph.get(stack.pop()!) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next)
+          stack.push(next)
+        }
+      }
+    }
+    return seen
+  }
+
+  const assigned = new Set<number>()
+  let components = 0
+  let largest = new Set<number>()
+  for (const node of undirected.keys()) {
+    if (assigned.has(node)) continue
+    const component = walk(node, undirected)
+    for (const item of component) assigned.add(item)
+    components++
+    if (component.size > largest.size) largest = component
+  }
+  const isolatedWays = ways.filter((way) => !largest.has(way.nds[0]!)).map((way) => way.id)
+
+  // Сильно связное ядро основной группы ищем от самого проезжаемого узла
+  let hub = -1
+  let hubDegree = -1
+  for (const node of largest) {
+    const degree = (forward.get(node)?.length ?? 0) + (backward.get(node)?.length ?? 0)
+    if (degree > hubDegree) {
+      hubDegree = degree
+      hub = node
+    }
+  }
+  const fromHub = hub >= 0 ? walk(hub, forward) : new Set<number>()
+  const toHub = hub >= 0 ? walk(hub, backward) : new Set<number>()
+  const oneDirectionWays = ways
+    .filter((way) => largest.has(way.nds[0]!))
+    .filter((way) => way.nds.some((nd) => !fromHub.has(nd) || !toHub.has(nd)))
+    .map((way) => way.id)
+
+  return {
+    totalWays: ways.length,
+    components,
+    isolatedWays,
+    oneDirectionWays,
+    ok: isolatedWays.length === 0 && oneDirectionWays.length === 0,
   }
 }

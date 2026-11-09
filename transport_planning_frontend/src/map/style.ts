@@ -1,6 +1,7 @@
 import type {
   ExpressionSpecification,
   LayerSpecification,
+  RasterSourceSpecification,
   SourceSpecification,
 } from 'maplibre-gl'
 
@@ -21,11 +22,21 @@ export const SOURCE_IDS = [
   'arrows',
   'signals',
   'labels',
+  'elevated',
+  'simLoad',
+  'simJams',
+  'simSignals',
   'graphLinks',
   'graphNodes',
   'issues',
   'overlay',
 ] as const
+
+/**
+ * Уровни обслуживания A–F. Шкала упорядоченная: от холодного и незаметного к яркому,
+ * зелёного нет, чтобы её читали и при нарушениях цветового зрения. В интерфейсе рядом всегда буква.
+ */
+export const LOS_COLORS = ['#4aa3c7', '#6fc2b0', '#f0c94a', '#ec835a', '#d03b3b', '#e0409f']
 
 export const COLORS = {
   background: '#141518',
@@ -74,6 +85,8 @@ export function emptySources(): Record<string, SourceSpecification> {
   for (const id of SOURCE_IDS) {
     sources[id] = { type: 'geojson', data: { type: 'FeatureCollection', features: [] } }
   }
+  // Загрузка меняется часто, а геометрия — нет: перекрашиваем дороги через состояние объекта
+  sources.simLoad = { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'id' }
   return sources
 }
 
@@ -133,6 +146,13 @@ export function buildLayers(lat: number): LayerSpecification[] {
     } },
     { id: 'junctions', type: 'fill', source: 'junctions', filter: ground, paint: {
       'fill-color': COLORS.road,
+    } },
+    { id: 'sim-load', type: 'fill', source: 'simLoad', layout: { visibility: 'none' }, paint: {
+      'fill-color': ['match', ['coalesce', ['feature-state', 'los'], -1],
+        0, LOS_COLORS[0]!, 1, LOS_COLORS[1]!, 2, LOS_COLORS[2]!, 3, LOS_COLORS[3]!, 4, LOS_COLORS[4]!, 5, LOS_COLORS[5]!,
+        'rgba(0,0,0,0)'],
+      // Свободные дороги не спорят с пробками: заметнее всего то, что требует внимания
+      'fill-opacity': ['match', ['coalesce', ['feature-state', 'los'], -1], 0, 0.28, 1, 0.42, 2, 0.62, 3, 0.72, 4, 0.8, 5, 0.88, 0],
     } },
     { id: 'markings-edge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', ground, ['==', ['get', 'kind'], 'edge']], paint: {
       'line-color': COLORS.marking,
@@ -194,10 +214,10 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'fill-extrusion-height': ['get', 'height'],
       'fill-extrusion-opacity': 0.92,
     } },
-    { id: 'bridge-3d', type: 'fill-extrusion', source: 'surface', filter: elevated, layout: { visibility: 'none' }, paint: {
-      'fill-extrusion-color': '#6b6f78',
-      'fill-extrusion-base': 5,
-      'fill-extrusion-height': 5.8,
+    { id: 'road-3d', type: 'fill-extrusion', source: 'elevated', layout: { visibility: 'none' }, paint: {
+      'fill-extrusion-color': '#70747d',
+      'fill-extrusion-base': ['get', 'base'],
+      'fill-extrusion-height': ['get', 'top'],
     } },
 
     { id: 'graph-links', type: 'line', source: 'graphLinks', layout: { visibility: 'none', 'line-cap': 'round' }, paint: {
@@ -237,6 +257,18 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': false,
     } },
 
+    { id: 'sim-jams', type: 'circle', source: 'simJams', layout: { visibility: 'none' }, paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 5, 18, 13],
+      'circle-color': 'rgba(224,64,159,0.22)',
+      'circle-stroke-color': LOS_COLORS[5]!,
+      'circle-stroke-width': 2,
+    } },
+    { id: 'sim-signals', type: 'circle', source: 'simSignals', minzoom: 15, layout: { visibility: 'none' }, paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 2, 19, 5.5],
+      'circle-color': ['match', ['get', 'state'], 'green', '#22c55e', 'yellow', '#facc15', '#ef4444'],
+      'circle-stroke-color': '#0b0c0e',
+      'circle-stroke-width': 1.5,
+    } },
     { id: 'overlay-ribbon', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'ribbon'], paint: {
       'fill-color': COLORS.accent,
       'fill-opacity': 0.3,
@@ -321,15 +353,67 @@ export const ENGINEERING_LAYERS = [
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']
 export const TURN_LAYERS = ['turn-ribbon', 'turn-line']
-export const BASEMAP_TILES = {
-  osm: {
-    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-    maxzoom: 19,
-    attribution: '© OpenStreetMap',
-  },
-  satellite: {
-    tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-    maxzoom: 19,
-    attribution: 'Снимки © Esri',
-  },
-} as const
+export const SIM_LAYERS = ['sim-load', 'sim-jams', 'sim-signals']
+
+export type BasemapId = 'none' | 'satellite' | 'hybrid' | 'scheme2gis' | 'cartoDark' | 'cartoLight' | 'osm' | 'custom'
+
+export const BASEMAP_OPTIONS: { id: BasemapId; label: string }[] = [
+  { id: 'none', label: 'Без подложки' },
+  { id: 'satellite', label: 'Снимок Esri' },
+  { id: 'hybrid', label: 'Снимок и дороги' },
+  { id: 'scheme2gis', label: 'Схема 2ГИС' },
+  { id: 'cartoDark', label: 'Схема тёмная' },
+  { id: 'cartoLight', label: 'Схема светлая' },
+  { id: 'osm', label: 'OSM' },
+]
+
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services'
+const CARTO = 'https://basemaps.cartocdn.com'
+const carto = (style: string) =>
+  ['a', 'b', 'c', 'd'].map((sub) => `https://${sub}.${CARTO.slice(8)}/${style}/{z}/{x}/{y}@2x.png`)
+
+/**
+ * Источники подложки. Предел maxzoom задан по реальному наличию данных: выше него MapLibre
+ * растягивает последний уровень, а не просит пустые тайлы-заглушки.
+ */
+const BASEMAP_SOURCES: Record<Exclude<BasemapId, 'none' | 'custom'>, RasterSourceSpecification[]> = {
+  satellite: [
+    { type: 'raster', tiles: [`${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19, attribution: 'Снимки © Esri, Maxar' },
+  ],
+  hybrid: [
+    { type: 'raster', tiles: [`${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19, attribution: 'Снимки © Esri, Maxar' },
+    { type: 'raster', tiles: [`${ESRI}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19 },
+  ],
+  scheme2gis: [
+    { type: 'raster', tiles: ['https://tile0.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1', 'https://tile1.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1', 'https://tile2.maps.2gis.com/tiles?x={x}&y={y}&z={z}&v=1'], tileSize: 256, maxzoom: 18, attribution: '© 2ГИС' },
+  ],
+  cartoDark: [
+    { type: 'raster', tiles: carto('dark_all'), tileSize: 256, maxzoom: 20, attribution: '© CARTO, © OpenStreetMap' },
+  ],
+  cartoLight: [
+    { type: 'raster', tiles: carto('rastertiles/voyager'), tileSize: 256, maxzoom: 20, attribution: '© CARTO, © OpenStreetMap' },
+  ],
+  osm: [
+    { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap' },
+  ],
+}
+
+export function basemapSource(id: BasemapId, customUrl: string): RasterSourceSpecification[] {
+  if (id === 'none') return []
+  if (id === 'custom') {
+    const url = customUrl.trim()
+    return /^https:\/\/.+\{z\}.+/.test(url) ? [{ type: 'raster', tiles: [url], tileSize: 256, maxzoom: 20 }] : []
+  }
+  return BASEMAP_SOURCES[id]
+}
+
+/** Слои модели, прозрачность которых меняет ползунок: разметка остаётся, чтобы сверять её со снимком. */
+export const MODEL_FILL_LAYERS: { id: string; opacity: number }[] = [
+  { id: 'surface', opacity: 1 },
+  { id: 'junctions', opacity: 1 },
+  { id: 'surface-bridge', opacity: 1 },
+  { id: 'junctions-bridge', opacity: 1 },
+  { id: 'surface-tunnel', opacity: 0.65 },
+  { id: 'buildings', opacity: 1 },
+  { id: 'landuse', opacity: 0.85 },
+]

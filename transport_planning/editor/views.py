@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 from django.conf import settings
 from django.core.files.base import ContentFile
-from django.http import HttpResponse
+from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
+from django.views.static import serve
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -14,6 +16,9 @@ from .osm_io import ChangesError, OsmFormatError, apply_changes, parse_document
 from .preflight import run_preflight
 
 SAMPLE_NAME = 'example.osm'
+
+# Воркер карты браузер примет только как JavaScript, а таблицы типов на разных системах отличаются
+mimetypes.add_type('text/javascript', '.mjs')
 
 
 def _project_summary(project: Project) -> dict:
@@ -101,3 +106,15 @@ class ProjectPreflightView(APIView):
         except (ChangesError, OsmFormatError) as exc:
             return Response({'detail': str(exc)}, status=400)
         return Response(run_preflight(output))
+
+
+def frontend_index(request):
+    """Страница приложения в готовом образе. При разработке фронт отдаёт Vite."""
+    index = Path(settings.FRONTEND_DIST) / 'index.html'
+    if not index.is_file():
+        raise Http404('Фронтенд не собран')
+    return FileResponse(index.open('rb'), content_type='text/html; charset=utf-8')
+
+
+def frontend_asset(request, path):
+    return serve(request, path, document_root=Path(settings.FRONTEND_DIST) / 'assets')

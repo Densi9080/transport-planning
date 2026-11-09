@@ -1,6 +1,7 @@
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson'
 
 import type { OsmDoc } from './doc'
+import { heightAlong, linkHeights } from './elevation'
 import {
   add,
   bearing,
@@ -42,6 +43,7 @@ export type SceneLayer =
   | 'graphLinks'
   | 'graphNodes'
   | 'labels'
+  | 'elevated'
 
 export type Scene = Record<SceneLayer, FeatureCollection>
 
@@ -61,8 +63,11 @@ const LANE_ARROW_FROM_END_M = 7
 const ZEBRA_STRIPE_M = 0.55
 const ZEBRA_GAP_M = 0.65
 const ZEBRA_DEPTH_M = 3.2
+const ELEVATED_STEP_M = 4
+const MIN_VISIBLE_HEIGHT_M = 0.15
+const DECK_THICKNESS_M = 0.5
 
-interface ArmGeometry {
+export interface ArmGeometry {
   arm: Arm
   trim: number
   /** Подрезанная часть начинается здесь: ось и поперечная нормаль считаются от узла наружу. */
@@ -284,13 +289,13 @@ function pathLength(points: XY[]): number {
 }
 
 /** Какие полосы подхода выполняют манёвр: по turn:lanes, а если их нет, то по правилам разметки. */
-function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>): number[] {
+function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags = false): number[] {
   const profile = arm.link.profile
   const turns = arm.atStart ? profile.turnsBackward : profile.turnsForward
   const count = arm.lanesIn
   const all = Array.from({ length: count }, (_, i) => i)
 
-  if (turns && turns.length === count && turns.some((turn) => turn && turn !== 'none')) {
+  if (!ignoreTags && turns && turns.length === count && turns.some((turn) => turn && turn !== 'none')) {
     const tagged = all.filter((i) => turnAllows(turns[i] ?? '', kind))
     if (tagged.length > 0) return tagged
     return kind === 'through' ? all.filter((i) => !turns[i] || turns[i] === 'none') : []
@@ -320,15 +325,33 @@ function lanePoint(geometry: ArmGeometry, laneIndex: number, entering: boolean):
   return add(geometry.center, scale(leftNormal(roadDir), offset))
 }
 
-function buildTurnPaths(
+/** Соединение полосы подхода с полосой выезда внутри узла. */
+export interface Connector {
+  node: number
+  from: Arm
+  to: Arm
+  /** Номера полос слева направо по ходу движения. */
+  fromLane: number
+  toLane: number
+  kind: TurnKind
+  points: XY[]
+}
+
+/**
+ * Манёвры узла по полосам. Отрисовка и симуляция берут их отсюда,
+ * поэтому машины едут ровно по тем траекториям, которые показаны на карте.
+ */
+export function junctionConnectors(
   doc: OsmDoc,
   node: number,
   arms: Arm[],
   geometries: Map<Arm, ArmGeometry>,
-  output: Feature[],
-  projector: Projector,
-): void {
+): Connector[] {
   const restrictions = restrictionsAt(doc, node)
+  const connectors: Connector[] = []
+  // Стык двух дорог — это продолжение одной дороги, а не поворот
+  const continuation = arms.length === 2
+
   for (const from of arms) {
     if (from.lanesIn === 0) continue
     const fromGeometry = geometries.get(from)!
@@ -336,23 +359,68 @@ function buildTurnPaths(
     for (const to of arms) {
       if (to.lanesOut > 0 && to.neighbor !== from.neighbor) kinds.add(turnKind(from, to))
     }
-    for (const to of arms) {
-      if (to.lanesOut === 0 || to.neighbor === from.neighbor) continue
-      const kind = turnKind(from, to)
-      if (kind === 'reverse' || !isMovementAllowed(from, to, restrictions)) continue
-      const lanes = lanesForTurn(from, kind, kinds)
-      const toGeometry = geometries.get(to)!
-      lanes.forEach((lane, index) => {
-        const start = lanePoint(fromGeometry, lane, true)
-        const end = lanePoint(toGeometry, outLaneFor(index, lanes.length, to.lanesOut, kind), false)
-        const travelIn = scale(from.dir, -1)
-        const control =
-          lineIntersection(start, travelIn, end, to.dir) ?? scale(add(start, end), 0.5)
-        const safe = dist(control, start) < dist(start, end) * 2 ? control : scale(add(start, end), 0.5)
-        output.push(lineFeature(quadraticCurve(start, safe, end, 12), projector, { turn: kind, node }))
-      })
+
+    const collect = (ignoreTags: boolean): Connector[] => {
+      const found: Connector[] = []
+      for (const to of arms) {
+        if (to.lanesOut === 0 || to.neighbor === from.neighbor) continue
+        const kind = turnKind(from, to)
+        if (!continuation && kind === 'reverse') continue
+        if (!isMovementAllowed(from, to, restrictions)) continue
+        const lanes = continuation
+          ? Array.from({ length: from.lanesIn }, (_, i) => i)
+          : lanesForTurn(from, kind, kinds, ignoreTags)
+        const toGeometry = geometries.get(to)!
+        lanes.forEach((lane, index) => {
+          const toLane = outLaneFor(index, lanes.length, to.lanesOut, continuation ? 'through' : kind)
+          const start = lanePoint(fromGeometry, lane, true)
+          const end = lanePoint(toGeometry, toLane, false)
+          const travelIn = scale(from.dir, -1)
+          const control =
+            lineIntersection(start, travelIn, end, to.dir) ?? scale(add(start, end), 0.5)
+          const safe = dist(control, start) < dist(start, end) * 2 ? control : scale(add(start, end), 0.5)
+          found.push({
+            node,
+            from,
+            to,
+            fromLane: lane,
+            toLane,
+            kind,
+            points: quadraticCurve(start, safe, end, 12),
+          })
+        })
+      }
+      return found
+    }
+
+    // turn:lanes может не совпасть с реальными выездами: тогда подход не должен оказаться тупиком
+    const tagged = collect(false)
+    connectors.push(...(tagged.length > 0 ? tagged : collect(true)))
+  }
+  return connectors
+}
+
+/** Геометрия концов всех участков: сколько обрезано и как стыкуются. */
+export function computeArmGeometries(network: Network): Map<Arm, ArmGeometry> {
+  const geometries = new Map<Arm, ArmGeometry>()
+  for (const arms of network.arms.values()) {
+    for (const [arm, geometry] of armGeometry(arms)) geometries.set(arm, geometry)
+  }
+  return geometries
+}
+
+/** Подходы участка с обеих сторон. */
+export function armsByLink(network: Network): Map<Link, { start?: Arm; end?: Arm }> {
+  const result = new Map<Link, { start?: Arm; end?: Arm }>()
+  for (const arms of network.arms.values()) {
+    for (const arm of arms) {
+      const entry = result.get(arm.link) ?? {}
+      if (arm.atStart) entry.start = arm
+      else entry.end = arm
+      result.set(arm.link, entry)
     }
   }
+  return result
 }
 
 function zebra(
@@ -448,6 +516,40 @@ function buildMinor(way: OWay, doc: OsmDoc, projector: Projector, minor: Feature
   minor.push(lineFeature(points, projector, { wayId: way.id, highway: tags.highway }))
 }
 
+/** Участок над землёй: в 3D это настил из коротких плит, каждая на своей высоте. */
+function elevatedSegments(
+  doc: OsmDoc,
+  link: Link,
+  trimStart: number,
+  trimEnd: number,
+  halfWidth: number,
+  output: Feature[],
+  projector: Projector,
+): void {
+  const profile = linkHeights(doc, link)
+  if (profile.heights.every((height) => Math.abs(height) < MIN_VISIBLE_HEIGHT_M)) return
+  const start = trimStart
+  const end = link.length - trimEnd
+  const count = Math.max(1, Math.round((end - start) / ELEVATED_STEP_M))
+  for (let i = 0; i < count; i++) {
+    const a = start + ((end - start) * i) / count
+    const b = start + ((end - start) * (i + 1)) / count
+    const pa = pointAlong(link.points, a)
+    const pb = pointAlong(link.points, b)
+    const na = scale(leftNormal(pa.dir), halfWidth)
+    const nb = scale(leftNormal(pb.dir), halfWidth)
+    const z = heightAlong(profile, (a + b) / 2)
+    if (z < MIN_VISIBLE_HEIGHT_M) continue
+    output.push(
+      polygonFeature(
+        [add(pa.point, na), add(pb.point, nb), sub(pb.point, nb), sub(pa.point, na)],
+        projector,
+        { wayId: link.wayId, base: z - DECK_THICKNESS_M, top: z },
+      ),
+    )
+  }
+}
+
 function graphRoadClass(highway: string): string {
   return highway.replace('_link', '')
 }
@@ -465,13 +567,10 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   const graphLinks = EMPTY()
   const graphNodes = EMPTY()
   const labels = EMPTY()
+  const elevated = EMPTY()
 
-  const geometries = new Map<Arm, ArmGeometry>()
+  const geometries = computeArmGeometries(network)
   for (const [node, arms] of network.arms) {
-    const atLevel = arms
-    const computed = armGeometry(atLevel)
-    for (const [arm, geometry] of computed) geometries.set(arm, geometry)
-
     if (arms.length >= 2 && !isSeamless(arms)) {
       const ring = junctionRing(arms.map((arm) => geometries.get(arm)!))
       junctions.push(
@@ -481,7 +580,11 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
         }),
       )
     }
-    if (arms.length >= 3) buildTurnPaths(doc, node, arms, geometries, turnPaths, projector)
+    if (arms.length >= 3) {
+      for (const connector of junctionConnectors(doc, node, arms, geometries)) {
+        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node }))
+      }
+    }
     if (arms.length !== 2 || !isSeamless(arms)) {
       const position = projector.toXY(doc.node(node))
       if (arms.length >= 2) {
@@ -490,18 +593,10 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     }
   }
 
-  const armsByLink = new Map<Link, { start?: Arm; end?: Arm }>()
-  for (const arms of network.arms.values()) {
-    for (const arm of arms) {
-      const entry = armsByLink.get(arm.link) ?? {}
-      if (arm.atStart) entry.start = arm
-      else entry.end = arm
-      armsByLink.set(arm.link, entry)
-    }
-  }
+  const linkArms = armsByLink(network)
 
   for (const link of network.links) {
-    const { start, end } = armsByLink.get(link) ?? {}
+    const { start, end } = linkArms.get(link) ?? {}
     const startGeometry = start ? geometries.get(start) : undefined
     const endGeometry = end ? geometries.get(end) : undefined
     const trimmed = trimPolyline(link.points, startGeometry?.trim ?? 0, endGeometry?.trim ?? 0)
@@ -525,6 +620,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     const noLines = highway === 'service' && !tags.lanes
     laneMarkingsFor(link, trimmed, startTangent, endTangent, level, markings, projector, noLines)
     laneArrows(link, trimmed, level, arrows, projector)
+    elevatedSegments(doc, link, startGeometry?.trim ?? 0, endGeometry?.trim ?? 0, offsets.left, elevated, projector)
 
     graphLinks.push(
       lineFeature(link.points, projector, {
@@ -556,6 +652,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       graphLinks: collection(graphLinks),
       graphNodes: collection(graphNodes),
       labels: collection(labels),
+      elevated: collection(elevated),
     },
   }
 }

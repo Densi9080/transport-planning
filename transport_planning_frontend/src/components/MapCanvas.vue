@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import {
   type GeoJSONSource,
+  type ImageSource,
   type LngLat,
   Map as MlMap,
   type MapMouseEvent,
+  Marker,
   NavigationControl,
   setWorkerUrl,
 } from 'maplibre-gl'
@@ -18,15 +20,22 @@ import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene } from '@/core/scene'
 import type { LatLon, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
+import { CarLayer } from '@/map/carLayer'
 import {
-  BASEMAP_TILES,
+  basemapSource,
   buildLayers,
   emptySources,
   ENGINEERING_LAYERS,
   GRAPH_LAYERS,
+  MODEL_FILL_LAYERS,
+  SIM_LAYERS,
   TURN_LAYERS,
 } from '@/map/style'
+import { parseSpeed } from '@/sim/macro'
+import { losFromSpeedRatio } from '@/sim/micro'
+import { signalState } from '@/sim/net'
 import { type DrawPoint, useEditor } from '@/stores/editor'
+import { useSimulation } from '@/stores/simulation'
 
 // Сам MapLibre ищет воркер рядом со своим модулем, а после сборки его там нет
 setWorkerUrl(mapWorkerUrl)
@@ -38,6 +47,7 @@ const ANGLE_STEP_DEG = 15
 const MIN_DRAW_STEP_PX = 5
 
 const editor = useEditor()
+const sim = useSimulation()
 const container = ref<HTMLDivElement | null>(null)
 const hud = ref<{ x: number; y: number; text: string }[]>([])
 
@@ -78,6 +88,7 @@ let hover: Hit | null = null
 let cursorSnap: Snap | null = null
 let cursorPosition: LatLon | null = null
 let suppressClick = false
+let resizeObserver: ResizeObserver | null = null
 
 /** Координаты дорог в метрах, чтобы искать ближайшую без лишних пересчётов на каждое движение мыши. */
 let wayCache = new Map<number, { points: XY[]; ids: number[]; half: number; level: number; drivable: boolean }>()
@@ -429,6 +440,7 @@ function scheduleOverlay(): void {
 }
 
 function onMouseDown(event: MapMouseEvent): void {
+  if (editor.viewMode === 'sim') return
   if (event.originalEvent.button !== 0 || editor.tool !== 'select' || event.originalEvent.shiftKey) return
   const hit = pick(event.lngLat)
   if (!hit || hit.kind === 'way') return
@@ -562,10 +574,17 @@ function applyView(): void {
     for (const id of ids) m.setLayoutProperty(id, 'visibility', show ? 'visible' : 'none')
   }
   const mode = editor.viewMode
+  const isSim = mode === 'sim'
   const lane = mode !== 'graph'
+  const threeD = mode === '3d' || (isSim && sim.camera3d)
   visible(ENGINEERING_LAYERS, lane)
   visible(GRAPH_LAYERS, mode === 'graph')
-  visible(TURN_LAYERS, lane && editor.layers.turnPaths)
+  // В симуляции траектории поворотов только мешали бы видеть машины и пробки
+  visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths)
+  visible(SIM_LAYERS, isSim)
+  m.setLayoutProperty('sim-load', 'visibility', isSim && sim.showLoad ? 'visible' : 'none')
+  m.setLayoutProperty('sim-jams', 'visibility', isSim && sim.level === 'micro' ? 'visible' : 'none')
+  m.setLayoutProperty('sim-signals', 'visibility', isSim && sim.level === 'micro' ? 'visible' : 'none')
   visible(['arrows'], lane && editor.layers.arrows)
   visible(['crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
@@ -573,35 +592,205 @@ function applyView(): void {
   visible(['minor'], editor.layers.minor)
   visible(['rail'], editor.layers.rail)
   visible(['landuse', 'water-fill', 'water-line'], editor.layers.landuse)
-  visible(['buildings'], editor.layers.buildings && mode !== '3d')
-  visible(['buildings-3d'], editor.layers.buildings && mode === '3d')
-  visible(['bridge-3d'], mode === '3d')
-  visible(['issues', 'issues-focus'], editor.layers.issues)
+  visible(['buildings'], editor.layers.buildings && !threeD)
+  visible(['buildings-3d'], editor.layers.buildings && threeD)
+  visible(['road-3d'], threeD)
+  visible(['issues', 'issues-focus'], editor.layers.issues && !isSim)
   wayCacheRev = -1
 }
 
+const BASEMAP_LAYERS = ['basemap', 'basemap-2']
+
 function applyBasemap(): void {
   if (!ready || !map) return
-  if (map.getLayer('basemap')) map.removeLayer('basemap')
-  if (map.getSource('basemap')) map.removeSource('basemap')
-  if (editor.basemap === 'none') return
-  const config = BASEMAP_TILES[editor.basemap]
-  map.addSource('basemap', {
-    type: 'raster',
-    tiles: [...config.tiles],
-    tileSize: 256,
-    maxzoom: config.maxzoom,
-    attribution: config.attribution,
+  const m = map
+  for (const id of BASEMAP_LAYERS) {
+    if (m.getLayer(id)) m.removeLayer(id)
+    if (m.getSource(id)) m.removeSource(id)
+  }
+  basemapSource(editor.basemap, editor.customTileUrl).forEach((spec, index) => {
+    const id = BASEMAP_LAYERS[index]!
+    m.addSource(id, spec)
+    m.addLayer(
+      {
+        id,
+        type: 'raster',
+        source: id,
+        paint: {
+          'raster-opacity': editor.basemapOpacity,
+          // Плавное масштабирование и короткое появление: без мыла и без мигания при панорамировании
+          'raster-resampling': 'linear',
+          'raster-fade-duration': 120,
+        },
+      },
+      'landuse',
+    )
   })
-  map.addLayer(
-    {
-      id: 'basemap',
-      type: 'raster',
-      source: 'basemap',
-      paint: { 'raster-opacity': editor.basemapOpacity },
-    },
-    'landuse',
-  )
+  applyModelOpacity()
+}
+
+function applyModelOpacity(): void {
+  if (!ready || !map) return
+  for (const layer of MODEL_FILL_LAYERS) {
+    map.setPaintProperty(layer.id, 'fill-opacity', layer.opacity * editor.modelOpacity)
+  }
+}
+
+let cornerMarkers: Marker[] = []
+
+function applyImageUnderlay(): void {
+  if (!ready || !map) return
+  const m = map
+  const image = editor.imageUnderlay
+  if (!image) {
+    if (m.getLayer('image-underlay')) m.removeLayer('image-underlay')
+    if (m.getSource('image-underlay')) m.removeSource('image-underlay')
+    cornerMarkers.forEach((marker) => marker.remove())
+    cornerMarkers = []
+    return
+  }
+  const source = m.getSource('image-underlay') as ImageSource | undefined
+  if (source) {
+    source.setCoordinates(image.corners)
+  } else {
+    m.addSource('image-underlay', { type: 'image', url: image.url, coordinates: image.corners })
+    m.addLayer({ id: 'image-underlay', type: 'raster', source: 'image-underlay', paint: { 'raster-fade-duration': 0 } }, 'landuse')
+  }
+  if (cornerMarkers.length === 0) {
+    cornerMarkers = image.corners.map((corner, index) => {
+      const marker = new Marker({ draggable: true, color: '#f43f5e', scale: 0.7 }).setLngLat(corner).addTo(m)
+      marker.on('drag', () => {
+        const position = marker.getLngLat()
+        editor.moveImageCorner(index, [position.lng, position.lat])
+      })
+      return marker
+    })
+  }
+}
+
+function publishCamera(): void {
+  if (!map) return
+  const center = map.getCenter()
+  editor.camera = {
+    center: [center.lng, center.lat],
+    zoom: map.getZoom(),
+    bearing: map.getBearing(),
+    pitch: map.getPitch(),
+  }
+}
+
+let carLayer: CarLayer | null = null
+let simFrame = 0
+let lastFrameTime = 0
+let lastSignalsAt = 0
+
+/** Контуры направлений задаются один раз на сеть: потом меняется только цвет. */
+function applySimNet(): void {
+  if (!ready || !map) return
+  const net = sim.net
+  const projector = editor.projector
+  if (!net || !projector) {
+    setData('simLoad', { type: 'FeatureCollection', features: [] })
+    return
+  }
+  const features: Feature[] = []
+  for (const edge of net.edges) {
+    if (edge.outline.length < 3) continue
+    const ring = edge.outline.map((point) => projector.toLngLat(point))
+    ring.push(ring[0]!)
+    features.push({
+      type: 'Feature',
+      properties: { id: edge.id, wayId: edge.wayId },
+      geometry: { type: 'Polygon', coordinates: [ring] },
+    })
+  }
+  setData('simLoad', { type: 'FeatureCollection', features })
+  applyLoadColors()
+}
+
+function applyLoadColors(): void {
+  if (!ready || !map) return
+  const m = map
+  const net = sim.net
+  if (!net || !m.getSource('simLoad')) return
+  if (sim.level === 'macro') {
+    const loads = sim.macro?.loads
+    if (!loads) return
+    for (const edge of net.edges) {
+      const load = loads.get(edge)
+      m.setFeatureState({ source: 'simLoad', id: edge.id }, { los: load ? load.los : -1 })
+    }
+  } else {
+    for (const edge of net.edges) {
+      const hasTraffic = edge.carCount > 0 || edge.speedRatio < 0.95
+      m.setFeatureState({ source: 'simLoad', id: edge.id }, { los: hasTraffic ? losFromSpeedRatio(edge.speedRatio) : -1 })
+    }
+  }
+}
+
+function applyJams(): void {
+  const projector = editor.projector
+  if (!ready || !projector) return
+  const jams = sim.level === 'micro' ? (sim.stats?.jams ?? []) : []
+  setData('simJams', {
+    type: 'FeatureCollection',
+    features: jams.map((jam) => ({
+      type: 'Feature',
+      properties: { cars: jam.cars },
+      geometry: { type: 'Point', coordinates: projector.toLngLat(jam.point) },
+    })),
+  })
+}
+
+function applySignals(time: number): void {
+  const projector = editor.projector
+  const net = sim.net
+  if (!ready || !projector || !net) return
+  const features: Feature[] = []
+  for (const group of net.signals) {
+    for (const stop of group.stops) {
+      features.push({
+        type: 'Feature',
+        properties: { state: signalState(group, stop.connector.phase, time) },
+        geometry: { type: 'Point', coordinates: projector.toLngLat(stop) },
+      })
+    }
+  }
+  setData('simSignals', { type: 'FeatureCollection', features })
+}
+
+/** Отдельный цикл кадров: симуляция идёт даже тогда, когда карта сама не перерисовывается. */
+function simLoop(now: number): void {
+  simFrame = requestAnimationFrame(simLoop)
+  const seconds = lastFrameTime ? (now - lastFrameTime) / 1000 : 0
+  lastFrameTime = now
+  if (!map || !carLayer || editor.viewMode !== 'sim' || sim.level !== 'micro') return
+  const micro = sim.micro
+  if (!micro) return
+  sim.frame(seconds)
+  carLayer.cars = micro.cars
+  carLayer.alpha = sim.alpha
+  carLayer.colorBySpeed = sim.colorBySpeed
+  if (sim.running) {
+    map.triggerRepaint()
+    if (now - lastSignalsAt > 400) {
+      lastSignalsAt = now
+      applySignals(micro.time)
+    }
+  }
+}
+
+function syncCars(): void {
+  if (!carLayer) return
+  const showCars = editor.viewMode === 'sim' && sim.level === 'micro'
+  carLayer.cars = showCars ? (sim.micro?.cars ?? []) : []
+  map?.triggerRepaint()
+}
+
+function applyCamera(): void {
+  if (!map) return
+  const threeD = editor.viewMode === '3d' || (editor.viewMode === 'sim' && sim.camera3d)
+  map.easeTo({ pitch: threeD ? 58 : 0, bearing: threeD ? -20 : 0, duration: 700 })
 }
 
 function fitToBounds(): void {
@@ -643,6 +832,12 @@ onMounted(() => {
     registerIcons(instance)
     for (const layer of buildLayers(center[1])) instance.addLayer(layer)
     ready = true
+    carLayer = new CarLayer(editor.projector!)
+    carLayer.limitOf = (car) => {
+      const edge = car.route[car.routeIndex]
+      return edge ? parseSpeed(edge.tags.maxspeed, edge.tags.highway ?? 'road') / 3.6 : 14
+    }
+    instance.addLayer(carLayer, 'buildings-3d')
     const backdrop = buildStaticScene(doc)
     setData('buildings', backdrop.buildings)
     setData('landuse', backdrop.landuse)
@@ -654,7 +849,17 @@ onMounted(() => {
     renderScene()
     renderIssues()
     renderOverlay()
+    publishCamera()
+    applyImageUnderlay()
+    if (editor.viewMode === 'sim') {
+      applySimNet()
+      syncCars()
+    }
   })
+
+  simFrame = requestAnimationFrame(simLoop)
+  resizeObserver = new ResizeObserver(() => instance.resize())
+  resizeObserver.observe(container.value!)
 
   instance.on('mousemove', onMouseMove)
   instance.on('mousedown', onMouseDown)
@@ -664,6 +869,7 @@ onMounted(() => {
   instance.on('zoom', () => (editor.zoom = instance.getZoom()))
   instance.on('move', () => {
     if (editor.tool === 'road') scheduleOverlay()
+    publishCamera()
   })
   instance.on('mouseout', () => {
     if (hover) {
@@ -676,6 +882,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(frame)
   cancelAnimationFrame(overlayFrame)
+  cancelAnimationFrame(simFrame)
+  resizeObserver?.disconnect()
+  cornerMarkers.forEach((marker) => marker.remove())
+  cornerMarkers = []
+  carLayer = null
   map?.remove()
   map = null
   ready = false
@@ -693,14 +904,40 @@ watch(() => editor.tool, () => {
   if (map) map.getCanvas().style.cursor = editor.tool === 'select' ? '' : 'crosshair'
   scheduleOverlay()
 })
-watch(() => editor.basemap, applyBasemap)
+watch(() => [editor.basemap, editor.customTileUrl], applyBasemap)
 watch(() => editor.basemapOpacity, (value) => {
-  if (map?.getLayer('basemap')) map.setPaintProperty('basemap', 'raster-opacity', value)
+  for (const id of BASEMAP_LAYERS) if (map?.getLayer(id)) map.setPaintProperty(id, 'raster-opacity', value)
 })
-watch(() => editor.viewMode, (mode) => {
+watch(() => editor.modelOpacity, applyModelOpacity)
+watch(() => editor.imageUnderlay, applyImageUnderlay)
+watch(() => editor.cameraRequest, (state) => {
+  if (state && map) map.jumpTo({ center: state.center, zoom: state.zoom, bearing: state.bearing, pitch: state.pitch })
+})
+watch(() => editor.viewMode, () => {
   applyView()
   scheduleOverlay()
-  map?.easeTo({ pitch: mode === '3d' ? 58 : 0, bearing: mode === '3d' ? -20 : 0, duration: 700 })
+  applyCamera()
+  syncCars()
+})
+watch(() => sim.net, applySimNet)
+watch(() => sim.macro, applyLoadColors)
+watch(() => sim.loadRev, () => {
+  applyLoadColors()
+  applyJams()
+})
+watch(() => [sim.level, sim.showLoad], () => {
+  applyView()
+  applyLoadColors()
+  applyJams()
+  syncCars()
+})
+watch(() => sim.camera3d, () => {
+  applyView()
+  applyCamera()
+})
+watch(() => sim.micro, () => {
+  syncCars()
+  applyLoadColors()
 })
 watch(() => editor.focusRequest, (request) => {
   if (!request || !map) return

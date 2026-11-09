@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import BasemapBar from '@/components/BasemapBar.vue'
+import CompareMap from '@/components/CompareMap.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
@@ -11,9 +12,11 @@ import ToolDock from '@/components/ToolDock.vue'
 import TopBar from '@/components/TopBar.vue'
 import { parseProfile, withLanes } from '@/core/lanes'
 import { type Tool, useEditor } from '@/stores/editor'
+import { useSimulation } from '@/stores/simulation'
 
 const props = defineProps<{ id: string }>()
 const editor = useEditor()
+const sim = useSimulation()
 const canvas = ref<InstanceType<typeof MapCanvas> | null>(null)
 
 const TOOL_KEYS: Record<string, Tool> = {
@@ -52,8 +55,24 @@ function changeLanes(delta: number): void {
 
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
+  // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
+  if (editor.exportOpen || editor.helpOpen) return
   const key = event.key.toLowerCase()
   const code = event.code
+
+  // В симуляции граф не правится: иначе модель считала бы уже не ту сеть
+  if (editor.viewMode === 'sim') {
+    if (code === 'Space') {
+      event.preventDefault()
+      sim.togglePlay()
+    } else if (key === 'escape') {
+      editor.select([])
+    } else if (code === 'F1') {
+      event.preventDefault()
+      editor.helpOpen = !editor.helpOpen
+    }
+    return
+  }
 
   if ((event.ctrlKey || event.metaKey) && (code === 'KeyZ' || code === 'KeyY')) {
     event.preventDefault()
@@ -142,6 +161,18 @@ watch(
   },
 )
 watch(
+  () => editor.viewMode,
+  (mode, previous) => {
+    if (mode === 'sim') {
+      editor.setTool('select')
+      editor.inspectorOpen = true
+      sim.enter()
+    } else if (previous === 'sim') {
+      sim.leave()
+    }
+  },
+)
+watch(
   () => editor.tool,
   (tool) => {
     if (tool === 'road') editor.inspectorOpen = true
@@ -160,11 +191,14 @@ watch(
       Читаем граф…
     </div>
     <template v-else>
-      <MapCanvas ref="canvas" :key="id" />
+      <div class="stage" :class="{ split: editor.compareOpen }">
+        <MapCanvas ref="canvas" :key="id" />
+      </div>
+      <CompareMap v-if="editor.compareOpen" />
       <TopBar />
       <NavigatorPanel v-show="editor.navigatorOpen" />
       <InspectorPanel v-show="editor.inspectorOpen" />
-      <ToolDock />
+      <ToolDock v-if="editor.viewMode !== 'sim'" />
       <BasemapBar />
       <ExportDialog v-if="editor.exportOpen" />
       <HelpDialog v-if="editor.helpOpen" />
@@ -182,6 +216,13 @@ watch(
   position: fixed;
   inset: 0;
   overflow: hidden;
+}
+.stage {
+  position: absolute;
+  inset: 0;
+}
+.stage.split {
+  right: 50%;
 }
 .state {
   height: 100%;

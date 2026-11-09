@@ -120,6 +120,31 @@ class ExampleFileTests(SimpleTestCase):
         self.assertEqual(canonical_elements(apply_changes(data, {})), canonical_elements(data))
 
 
+class FrontendServingTests(SimpleTestCase):
+    def test_serves_built_app_and_keeps_api_routes(self):
+        with tempfile.TemporaryDirectory() as dist:
+            root = Path(dist)
+            (root / 'assets').mkdir()
+            (root / 'index.html').write_text('<title>app</title>', encoding='utf-8')
+            (root / 'assets' / 'worker.mjs').write_text('export {}', encoding='utf-8')
+            with override_settings(FRONTEND_DIST=root):
+                page = self.client.get('/p/some-project')
+                self.addCleanup(page.close)
+                self.assertEqual(page.status_code, 200)
+                self.assertIn(b'app', b''.join(page.streaming_content))
+                page.close()
+                worker = self.client.get('/assets/worker.mjs')
+                self.assertEqual(worker.status_code, 200)
+                self.assertIn('javascript', worker['Content-Type'])
+                worker.close()
+                # Обход каталога закодирован, иначе клиент сам схлопнул бы путь и запрос не дошёл бы до проверки
+                self.assertIn(self.client.get('/assets/%2e%2e/index.html').status_code, (400, 404))
+
+    def test_missing_build_gives_404(self):
+        with tempfile.TemporaryDirectory() as dist, override_settings(FRONTEND_DIST=Path(dist)):
+            self.assertEqual(self.client.get('/').status_code, 404)
+
+
 class ApiTests(TestCase):
     def setUp(self):
         media = tempfile.mkdtemp()

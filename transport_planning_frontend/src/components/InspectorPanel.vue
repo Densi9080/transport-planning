@@ -6,6 +6,7 @@ import { useEditor } from '@/stores/editor'
 
 import NodeInspector from './NodeInspector.vue'
 import RoadPresets from './RoadPresets.vue'
+import SimPanel from './SimPanel.vue'
 import WayInspector from './WayInspector.vue'
 
 const editor = useEditor()
@@ -19,7 +20,8 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
 
 <template>
   <aside class="inspector panel" aria-label="Инспектор">
-    <RoadPresets v-if="editor.tool === 'road'" />
+    <SimPanel v-if="editor.viewMode === 'sim'" />
+    <RoadPresets v-else-if="editor.tool === 'road'" />
     <WayInspector v-else-if="isSingleWay" :key="ways[0]!.id" :way="ways[0]!" />
     <NodeInspector v-else-if="isSingleNode" :key="nodes[0]!.id" :node="nodes[0]!" />
     <div v-else-if="isMulti" class="section">

@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 db.sqlite3
 transport_planning/media/
+transport_planning/frontend_dist/
 .claude/
