@@ -5,9 +5,7 @@ import { type LeftTab, useEditor } from '@/stores/editor'
 
 import FilterPanel from './FilterPanel.vue'
 import GraphicsPanel from './GraphicsPanel.vue'
-import IssuesPanel from './IssuesPanel.vue'
 import NetworkPanel from './NetworkPanel.vue'
-import TransitPanel from './TransitPanel.vue'
 
 const editor = useEditor()
 
@@ -17,8 +15,6 @@ const tabs = computed<{ id: LeftTab; label: string; badge?: number }[]>(() => [
   { id: 'network', label: 'Сеть' },
   { id: 'graphics', label: 'Графика' },
   { id: 'filter', label: 'Фильтр', badge: activeFilters.value || undefined },
-  { id: 'transit', label: 'Линии ОТ' },
-  { id: 'issues', label: 'Проверка', badge: editor.errorCount || undefined },
 ])
 </script>
 
@@ -38,11 +34,9 @@ const tabs = computed<{ id: LeftTab; label: string; badge?: number }[]>(() => [
       </button>
     </div>
     <div class="body">
-      <NetworkPanel v-if="editor.leftTab === 'network'" />
-      <GraphicsPanel v-else-if="editor.leftTab === 'graphics'" />
+      <GraphicsPanel v-if="editor.leftTab === 'graphics'" />
       <FilterPanel v-else-if="editor.leftTab === 'filter'" />
-      <TransitPanel v-else-if="editor.leftTab === 'transit'" />
-      <IssuesPanel v-else />
+      <NetworkPanel v-else />
     </div>
   </aside>
 </template>
@@ -52,7 +46,7 @@ const tabs = computed<{ id: LeftTab; label: string; badge?: number }[]>(() => [
   display: flex;
   flex-direction: column;
   flex: none;
-  width: 280px;
+  width: 310px;
   min-height: 0;
   background: var(--panel);
   border-right: 1px solid var(--line-strong);
@@ -60,7 +54,7 @@ const tabs = computed<{ id: LeftTab; label: string; badge?: number }[]>(() => [
 .body {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 .badge {
   min-width: 14px;

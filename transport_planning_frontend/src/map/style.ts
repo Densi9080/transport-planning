@@ -420,6 +420,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-color': COLORS.accentSoft,
       'line-width': 2.5,
     } },
+    { id: 'overlay-object', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'net-object'], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 9],
+      'circle-color': '#14171c',
+      'circle-stroke-width': 1.5,
+      'circle-stroke-color': ['match', ['get', 'letter'], 'V', '#38bdf8', 'З', '#fb923c', 'П', '#f472b6', 'Д', '#a3e635', 'Q', '#facc15', '#ffffff'],
+    } },
     { id: 'issues', type: 'circle', source: 'issues', paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 3, 18, 7],
       'circle-color': ['match', ['get', 'severity'], 'error', COLORS.error, 'warning', COLORS.warning, COLORS.info],

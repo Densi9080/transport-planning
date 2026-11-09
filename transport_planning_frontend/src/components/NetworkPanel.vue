@@ -1,258 +1,313 @@
 <script setup lang="ts">
 import {
-  Bus,
+  Activity,
+  ArrowDownToLine,
   Circle,
+  CircleSlash,
+  CornerUpRight,
   Eye,
   EyeOff,
-  Footprints,
   Gauge,
-  Hexagon,
-  Landmark,
-  List,
   Lock,
   LockOpen,
   MapPin,
-  OctagonAlert,
+  OctagonX,
+  Route,
   Search,
+  Signpost,
   Spline,
+  SquareDashed,
   TrafficCone,
-  TrainFrontTunnel,
-  Waves,
-  Workflow,
+  Users,
 } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
 import { isDrivable } from '@/core/lanes'
-import { reducedSections } from '@/core/traffic'
-import { type ListTab, type Tool, useEditor } from '@/stores/editor'
-import { useSimulation } from '@/stores/simulation'
+import { matchesNode, matchesWay, type NetObject } from '@/core/netObjects'
+import { junctionMovements } from '@/core/topology'
+import type { LatLon } from '@/core/types'
+import { type SelectedItem, useEditor } from '@/stores/editor'
+
+import TransitPanel from './TransitPanel.vue'
 
 const editor = useEditor()
-const sim = useSimulation()
 const query = ref('')
+const LIST_LIMIT = 300
 
 type LayerKey = keyof typeof editor.layers
 
 interface Row {
-  id: string
+  id: NetObject
   label: string
   icon: typeof Circle
-  count?: number
-  /** Щелчок по названию включает вставку объектов этого типа, как в Vissim. */
-  tool?: Tool
   layers?: LayerKey[]
-  lock?: 'links' | 'nodes'
-  list?: ListTab
 }
 
-const summary = computed(() => {
+const groups: { title: string; rows: Row[] }[] = [
+  {
+    title: 'Дорожная сеть',
+    rows: [
+      { id: 'nodes', label: 'Узлы', icon: Circle },
+      { id: 'links', label: 'Отрезки', icon: Spline },
+      { id: 'turns', label: 'Повороты', icon: CornerUpRight, layers: ['turnPaths'] },
+    ],
+  },
+  {
+    title: 'Общественный транспорт',
+    rows: [
+      { id: 'stopPoints', label: 'Пункты остановки', icon: MapPin, layers: ['transit'] },
+      { id: 'stopAreas', label: 'Зоны остановок', icon: SquareDashed, layers: ['transit'] },
+      { id: 'stops', label: 'Остановки', icon: Users, layers: ['transit'] },
+      { id: 'routes', label: 'Маршруты', icon: Route, layers: ['transit'] },
+    ],
+  },
+  {
+    title: 'Организация движения',
+    rows: [
+      { id: 'desiredSpeed', label: 'Решения о желаемой скорости', icon: Gauge },
+      { id: 'reducedSpeed', label: 'Зоны снижения скорости', icon: CircleSlash },
+      { id: 'stopSigns', label: 'Знаки стоп', icon: OctagonX, layers: ['trafficSigns'] },
+      { id: 'priorityRules', label: 'Правила приоритета', icon: Signpost },
+      { id: 'signals', label: 'Светофоры', icon: TrafficCone, layers: ['signals'] },
+      { id: 'detectors', label: 'Детекторы', icon: Activity },
+      { id: 'inflows', label: 'Входящие потоки', icon: ArrowDownToLine },
+    ],
+  },
+]
+
+const mapLayers: { key: LayerKey; label: string }[] = [
+  { key: 'buildings', label: 'Здания' },
+  { key: 'landuse', label: 'Территории и вода' },
+  { key: 'minor', label: 'Тротуары и тропы' },
+  { key: 'rail', label: 'Железная дорога' },
+  { key: 'other', label: 'Прочие линии' },
+  { key: 'points', label: 'Точечные объекты' },
+  { key: 'arrows', label: 'Стрелки на полосах' },
+  { key: 'labels', label: 'Названия улиц' },
+  { key: 'issues', label: 'Ошибки на карте' },
+]
+
+interface Item {
+  key: string
+  label: string
+  sub?: string
+  /** Сколько объектов стоит за строкой: в узле их может быть несколько. */
+  weight?: number
+  select?: SelectedItem
+  position?: LatLon
+}
+
+const index = computed<Record<NetObject, Item[]>>(() => {
   void editor.rev
+  const result = Object.fromEntries(groups.flatMap((group) => group.rows.map((row) => [row.id, [] as Item[]]))) as Record<NetObject, Item[]>
   const doc = editor.doc
-  const result = { drivable: 0, bumps: 0, signs: 0, signals: 0, crossings: 0, bridges: 0, tunnels: 0, sections: 0 }
   if (!doc) return result
-  for (const way of doc.ways.values()) {
-    if (!isDrivable(way.tags)) continue
-    result.drivable++
-    if (way.tags?.bridge && way.tags.bridge !== 'no') result.bridges++
-    if (way.tags?.tunnel && way.tags.tunnel !== 'no') result.tunnels++
-  }
+
   for (const node of doc.nodes.values()) {
-    const tags = node.tags
-    if (!tags) continue
-    if (tags.traffic_calming) result.bumps++
-    if (tags.highway === 'stop' || tags.highway === 'give_way') result.signs++
-    if (tags.highway === 'traffic_signals') result.signals++
-    if (tags.highway === 'crossing') result.crossings++
+    for (const type of ['stopPoints', 'stopAreas', 'stopSigns', 'signals', 'desiredSpeed', 'reducedSpeed', 'priorityRules', 'detectors', 'inflows'] as NetObject[]) {
+      if (matchesNode(type, node, doc)) {
+        result[type].push({ key: `n${node.id}`, label: node.tags?.name ?? `Узел ${node.id}`, sub: String(node.id), select: { kind: 'node', id: node.id }, position: node })
+      }
+    }
   }
-  if (editor.projector) result.sections = reducedSections(doc, editor.projector).length
+
+  const network = editor.network
+  for (const [id, arms] of network?.arms ?? []) {
+    if (arms.length < 3) continue
+    const node = doc.nodes.get(id)
+    if (!node) continue
+    result.nodes.push({ key: `j${id}`, label: `Узел ${id}`, sub: `подходов ${arms.length}`, select: { kind: 'node', id }, position: node })
+    if (network) {
+      const movements = junctionMovements(doc, network, id).length
+      result.turns.push({ key: `t${id}`, label: `Узел ${id}`, sub: `поворотов ${movements}`, weight: movements, select: { kind: 'node', id }, position: node })
+    }
+  }
+
+  for (const way of doc.ways.values()) {
+    const middle = doc.nodes.get(way.nds[Math.floor(way.nds.length / 2)]!)
+    if (isDrivable(way.tags)) {
+      result.links.push({ key: `w${way.id}`, label: way.tags?.name ?? way.tags?.highway ?? 'Отрезок', sub: String(way.id), select: { kind: 'way', id: way.id }, position: middle })
+    }
+    if (matchesWay('stopAreas', way)) {
+      result.stopAreas.push({ key: `w${way.id}`, label: way.tags?.name ?? `Платформа ${way.id}`, sub: String(way.id), select: { kind: 'way', id: way.id }, position: middle })
+    }
+  }
+
+  for (const relation of doc.relations.values()) {
+    if (relation.tags?.public_transport !== 'stop_area') continue
+    const first = relation.members.find(([type, ref]) => type === 'node' && doc.nodes.has(ref))
+    result.stops.push({ key: `r${relation.id}`, label: relation.tags.name ?? `Остановка ${relation.id}`, sub: `объектов ${relation.members.length}`, position: first ? doc.nodes.get(first[1]) : undefined })
+  }
   return result
 })
 
-const junctionCount = computed(() => {
-  let count = 0
-  for (const arms of editor.network?.arms.values() ?? []) if (arms.length >= 3) count++
-  return count
-})
-
-const groups = computed<{ title: string; rows: Row[] }[]>(() => {
-  const s = summary.value
-  const stops = new Set(editor.lines.flatMap((line) => line.stops.map((stop) => stop.node)))
-  return [
-    {
-      title: 'Дорожная сеть',
-      rows: [
-        { id: 'links', label: 'Отрезки', icon: Spline, count: s.drivable, tool: 'road', lock: 'links', list: 'links' },
-        { id: 'connectors', label: 'Соединения полос', icon: Workflow, tool: 'connector', layers: ['turnPaths'] },
-        { id: 'nodes', label: 'Узлы', icon: Circle, count: junctionCount.value, tool: 'node', lock: 'nodes', list: 'nodes' },
-        { id: 'bridges', label: 'Мосты', icon: Landmark, count: s.bridges, tool: 'bridge' },
-        { id: 'tunnels', label: 'Тоннели', icon: TrainFrontTunnel, count: s.tunnels, tool: 'tunnel' },
-      ],
-    },
-    {
-      title: 'Организация движения',
-      rows: [
-        { id: 'signals', label: 'Светофоры', icon: TrafficCone, count: s.signals, tool: 'signal', layers: ['signals'], list: 'signals' },
-        { id: 'crossings', label: 'Пешеходные переходы', icon: Footprints, count: s.crossings, tool: 'crossing', layers: ['crossings'] },
-        { id: 'sections', label: 'Участки скорости', icon: Gauge, count: s.sections, tool: 'speed', layers: ['trafficSigns'] },
-        { id: 'bumps', label: 'Лежачие полицейские', icon: Waves, count: s.bumps, tool: 'bump', layers: ['trafficSigns'] },
-        { id: 'signs', label: 'Знаки приоритета', icon: OctagonAlert, count: s.signs, tool: 'sign', layers: ['trafficSigns'] },
-      ],
-    },
-    {
-      title: 'Транспорт и районы',
-      rows: [
-        { id: 'lines', label: 'Линии ОТ', icon: Bus, count: editor.lines.length, layers: ['transit'], list: 'lines' },
-        { id: 'stops', label: 'Остановки', icon: MapPin, count: stops.size, layers: ['transit'], list: 'stops' },
-        { id: 'zones', label: 'Транспортные районы', icon: Hexagon, count: sim.macro?.zones.filter((zone) => zone.kind === 'internal').length ?? 0, layers: ['zones'], list: 'zones' },
-      ],
-    },
-    {
-      title: 'Карта',
-      rows: [
-        { id: 'buildings', label: 'Здания', icon: Hexagon, layers: ['buildings'] },
-        { id: 'landuse', label: 'Территории и вода', icon: Hexagon, layers: ['landuse'] },
-        { id: 'minor', label: 'Тротуары и тропы', icon: Spline, layers: ['minor'] },
-        { id: 'rail', label: 'Железная дорога', icon: Spline, layers: ['rail'] },
-        { id: 'other', label: 'Прочие линии', icon: Spline, layers: ['other'] },
-        { id: 'points', label: 'Точечные объекты', icon: Circle, layers: ['points'] },
-        { id: 'arrows', label: 'Стрелки на полосах', icon: Spline, layers: ['arrows'] },
-        { id: 'labels', label: 'Названия улиц', icon: Spline, layers: ['labels'] },
-        { id: 'issues', label: 'Ошибки на карте', icon: OctagonAlert, layers: ['issues'] },
-      ],
-    },
-  ]
-})
-
-function activate(row: Row): void {
-  if (row.id === 'lines' || row.id === 'stops') {
-    editor.leftTab = 'transit'
-    return
-  }
-  if (row.tool) {
-    editor.setTool(editor.tool === row.tool ? 'select' : row.tool)
-    return
-  }
-  if (row.id === 'zones') {
-    toggleVisible(row)
-    return
-  }
-  if (row.list) openList(row.list)
-  else if (row.layers) toggleVisible(row)
+function countOf(id: NetObject): number {
+  if (id === 'routes') return editor.lines.length
+  return index.value[id].reduce((sum, item) => sum + (item.weight ?? 1), 0)
 }
 
-function openList(tab: ListTab): void {
-  editor.listOpen = true
-  editor.listTab = tab
-}
+const activeLabel = computed(() => groups.flatMap((group) => group.rows).find((row) => row.id === editor.activeObject)?.label ?? '')
+
+const items = computed(() => {
+  const needle = query.value.trim().toLowerCase()
+  const list = index.value[editor.activeObject]
+  return needle ? list.filter((item) => `${item.label} ${item.sub ?? ''}`.toLowerCase().includes(needle)) : list
+})
 
 function isVisible(row: Row): boolean {
-  return (row.layers ?? []).every((key) => editor.layers[key])
+  if (row.layers) return row.layers.every((key) => editor.layers[key])
+  return !editor.objectHidden[row.id]
+}
+
+function canHide(row: Row): boolean {
+  return row.id !== 'links' && row.id !== 'nodes'
 }
 
 function toggleVisible(row: Row): void {
   const next = !isVisible(row)
-  // Районы считает макромодель: при первом включении её нужно запустить
-  if (row.id === 'zones' && next && !sim.macro) sim.enter()
-  for (const key of row.layers ?? []) (editor.layers[key] as boolean) = next
+  if (row.layers) for (const key of row.layers) (editor.layers[key] as boolean) = next
+  else editor.objectHidden[row.id] = !next
 }
 
-/** Замок отрезков оставляет выбираемыми только узлы, и наоборот. */
-function isLocked(row: Row): boolean {
-  return (row.lock === 'links' && editor.activeType === 'nodes') || (row.lock === 'nodes' && editor.activeType === 'links')
+function showItem(item: Item): void {
+  if (item.select) editor.selectOne(item.select)
+  if (item.position) editor.focusOn(item.position, 18)
 }
 
-function toggleLock(row: Row): void {
-  if (isLocked(row)) editor.activeType = 'auto'
-  else editor.activeType = row.lock === 'links' ? 'nodes' : 'links'
+function isSelected(item: Item): boolean {
+  return !!item.select && editor.selection.some((entry) => entry.kind === item.select!.kind && entry.id === item.select!.id)
 }
-
-const results = computed(() => {
-  void editor.rev
-  const doc = editor.doc
-  const needle = query.value.trim().toLowerCase()
-  if (!doc || !needle) return []
-  const groupsByName = new Map<string, number>()
-  for (const way of doc.ways.values()) {
-    const name = way.tags?.name
-    if (isDrivable(way.tags) && name?.toLowerCase().includes(needle) && !groupsByName.has(name)) groupsByName.set(name, way.id)
-  }
-  return [...groupsByName.entries()].slice(0, 30)
-})
 </script>
 
 <template>
-  <div class="search">
-    <Search :size="13" class="faint" aria-hidden="true" />
-    <input v-model="query" class="input" placeholder="Найти улицу" aria-label="Найти улицу" />
-  </div>
-  <div v-if="query.trim()" class="results">
-    <button v-for="[name, id] in results" :key="name" class="result ellipsis" @click="editor.focusWay(id)">{{ name }}</button>
-    <p v-if="results.length === 0" class="empty">Ничего не найдено</p>
-  </div>
-
-  <section v-for="group in groups" :key="group.title" :aria-label="group.title">
-    <div class="eyebrow head">{{ group.title }}</div>
-    <div v-for="row in group.rows" :key="row.id" class="row-item" :class="{ active: row.tool && editor.tool === row.tool }">
-      <button
-        class="square"
-        :disabled="!row.layers"
-        :aria-label="row.layers ? `${isVisible(row) ? 'Скрыть' : 'Показать'}: ${row.label}` : undefined"
-        :title="row.layers ? (isVisible(row) ? 'Скрыть на карте' : 'Показать на карте') : undefined"
-        :tabindex="row.layers ? 0 : -1"
-        @click="toggleVisible(row)"
-      >
-        <template v-if="row.layers">
-          <Eye v-if="isVisible(row)" :size="13" />
-          <EyeOff v-else :size="13" class="faint" />
-        </template>
-      </button>
-      <button class="main" :class="{ off: row.layers && !isVisible(row) }" :aria-pressed="row.tool ? editor.tool === row.tool : undefined" :title="row.tool ? 'Щелчок включает вставку на карте' : undefined" @click="activate(row)">
-        <component :is="row.icon" :size="14" aria-hidden="true" />
-        <span class="ellipsis">{{ row.label }}</span>
-        <span v-if="row.count !== undefined" class="count">{{ row.count }}</span>
-      </button>
-      <button v-if="row.list" class="square" :aria-label="`Открыть список: ${row.label}`" title="Открыть список" @click="openList(row.list)">
-        <List :size="13" />
-      </button>
-      <span v-else class="square" aria-hidden="true" />
-      <button v-if="row.lock" class="square" :aria-pressed="isLocked(row)" :aria-label="`${isLocked(row) ? 'Разрешить' : 'Запретить'} выбор: ${row.label}`" :title="isLocked(row) ? 'Выбор запрещён' : 'Запретить выбор на карте'" @click="toggleLock(row)">
-        <Lock v-if="isLocked(row)" :size="12" />
-        <LockOpen v-else :size="12" class="faint" />
-      </button>
-      <span v-else class="square" aria-hidden="true" />
+  <div class="panel-root">
+    <div class="objects">
+      <section v-for="group in groups" :key="group.title" :aria-label="group.title">
+        <div class="eyebrow head">{{ group.title }}</div>
+        <div v-for="row in group.rows" :key="row.id" class="row-item" :class="{ active: editor.activeObject === row.id }">
+          <button
+            class="square"
+            :disabled="!canHide(row)"
+            :aria-label="canHide(row) ? `${isVisible(row) ? 'Скрыть' : 'Показать'}: ${row.label}` : undefined"
+            :title="canHide(row) ? (isVisible(row) ? 'Скрыть на карте' : 'Показать на карте') : undefined"
+            @click="toggleVisible(row)"
+          >
+            <template v-if="canHide(row)">
+              <Eye v-if="isVisible(row)" :size="13" />
+              <EyeOff v-else :size="13" class="faint" />
+            </template>
+          </button>
+          <button class="main" :class="{ off: !isVisible(row) }" :aria-pressed="editor.activeObject === row.id" @click="editor.setActiveObject(row.id)">
+            <component :is="row.icon" :size="14" aria-hidden="true" />
+            <span class="ellipsis">{{ row.label }}</span>
+            <span class="count">{{ countOf(row.id) }}</span>
+          </button>
+          <button
+            class="square"
+            :aria-pressed="!!editor.objectLocked[row.id]"
+            :aria-label="`${editor.objectLocked[row.id] ? 'Разрешить' : 'Запретить'} выбор: ${row.label}`"
+            :title="editor.objectLocked[row.id] ? 'Выбор запрещён' : 'Запретить выбор на карте'"
+            @click="editor.objectLocked[row.id] = !editor.objectLocked[row.id]"
+          >
+            <Lock v-if="editor.objectLocked[row.id]" :size="12" />
+            <LockOpen v-else :size="12" class="faint" />
+          </button>
+        </div>
+      </section>
+      <details class="layers">
+        <summary class="eyebrow">Слои карты</summary>
+        <label v-for="layer in mapLayers" :key="layer.key" class="layer">
+          <input v-model="editor.layers[layer.key]" type="checkbox" />
+          {{ layer.label }}
+        </label>
+      </details>
     </div>
-  </section>
+
+    <div class="list">
+      <div class="list-head eyebrow">{{ activeLabel }}</div>
+      <TransitPanel v-if="editor.activeObject === 'routes'" />
+      <template v-else>
+        <div class="search">
+          <Search :size="13" class="faint" aria-hidden="true" />
+          <input v-model="query" class="input" placeholder="Найти" aria-label="Найти объект" />
+        </div>
+        <div class="rows">
+          <button v-for="item in items.slice(0, LIST_LIMIT)" :key="item.key" class="item" :class="{ selected: isSelected(item) }" @click="showItem(item)">
+            <span class="ellipsis">{{ item.label }}</span>
+            <span class="sub">{{ item.sub }}</span>
+          </button>
+          <p v-if="items.length === 0" class="empty">Объектов нет. Включите вставку (Insert) и добавьте на карте</p>
+        </div>
+      </template>
+    </div>
+  </div>
 </template>
 
 <style scoped>
+.panel-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.objects {
+  flex: none;
+  max-height: 62%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--line-strong);
+}
+.list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.list-head {
+  flex: none;
+  padding: 5px 8px 2px;
+}
 .search {
   position: relative;
-  padding: 6px 8px 2px;
+  flex: none;
+  padding: 2px 8px 4px;
 }
 .search svg {
   position: absolute;
   left: 14px;
-  top: 11px;
+  top: 7px;
 }
 .search input {
   padding-left: 23px;
 }
-.results {
-  padding: 2px 8px 4px;
+.rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
-.result {
-  display: block;
+.item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
-  padding: 2px 6px;
+  padding: 2px 8px;
   background: transparent;
   border: 0;
   text-align: left;
 }
-.result:hover {
+.item:hover {
   background: var(--row-hover);
 }
+.item.selected {
+  background: var(--row-selected);
+}
+.sub {
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
 .empty {
-  margin: 4px 6px;
+  margin: 6px 8px;
   color: var(--faint);
 }
 section {
@@ -299,5 +354,17 @@ section {
   padding: 0;
   background: transparent;
   border: 0;
+}
+.layers {
+  padding: 3px 8px 6px;
+}
+.layers summary {
+  cursor: pointer;
+}
+.layer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
 }
 </style>

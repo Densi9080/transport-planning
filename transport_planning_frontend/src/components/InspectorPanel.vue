@@ -28,7 +28,7 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
       <button role="tab" :class="{ active: editor.rightTab === 'quick' }" :aria-selected="editor.rightTab === 'quick'" @click="editor.rightTab = 'quick'">
         {{ editor.viewMode === 'sim' ? 'Расчёт' : 'Быстрый просмотр' }}
       </button>
-      <button role="tab" :class="{ active: editor.rightTab === 'assistant' }" :aria-selected="editor.rightTab === 'assistant'" @click="editor.rightTab = 'assistant'">
+      <button v-if="editor.rightTab === 'assistant'" role="tab" class="active" :aria-selected="editor.rightTab === 'assistant'" @click="editor.rightTab = 'assistant'">
         <Sparkles :size="12" aria-hidden="true" /> Помощник
         <span v-if="pendingProposals" class="badge">{{ pendingProposals }}</span>
       </button>

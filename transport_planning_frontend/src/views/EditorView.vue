@@ -4,6 +4,7 @@ import { onBeforeUnmount, onMounted, watch } from 'vue'
 import AppToolbar from '@/components/AppToolbar.vue'
 import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
+import ConsoleDock from '@/components/ConsoleDock.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
@@ -15,6 +16,7 @@ import MapBalance from '@/components/MapBalance.vue'
 import MapCanvas from '@/components/MapCanvas.vue'
 import MenuBar from '@/components/MenuBar.vue'
 import StatusBar from '@/components/StatusBar.vue'
+import ToolDock from '@/components/ToolDock.vue'
 import TrafficOptions from '@/components/TrafficOptions.vue'
 import { parseProfile, withLanes } from '@/core/lanes'
 import { useAssistant } from '@/stores/assistant'
@@ -78,6 +80,12 @@ function onKeyDown(event: KeyboardEvent): void {
     return
   }
 
+  if (code === 'Backquote') {
+    event.preventDefault()
+    editor.consoleOpen = !editor.consoleOpen
+    return
+  }
+
   // Инструментами в симуляции граф не правится, а отмену расчёт подхватит сам
   if (editor.viewMode === 'sim') {
     if (code === 'Space') {
@@ -98,6 +106,12 @@ function onKeyDown(event: KeyboardEvent): void {
     return
   }
   if (event.ctrlKey || event.metaKey || event.altKey) return
+
+  if (code === 'Insert') {
+    event.preventDefault()
+    editor.toggleInsert()
+    return
+  }
 
   if (key === 'escape') {
     if (editor.drawPoints.length > 0) editor.drawPoints = []
@@ -227,12 +241,14 @@ watch(
             <CompareMap v-if="editor.compareOpen" />
             <TrafficOptions />
             <MapBalance />
+            <ToolDock v-if="editor.viewMode !== 'sim'" />
             <div class="toasts" aria-live="polite">
               <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
                 {{ item.text }}
               </div>
             </div>
           </div>
+          <ConsoleDock v-if="editor.consoleOpen" />
           <ListDock v-if="editor.listOpen" />
         </div>
         <InspectorPanel v-show="editor.inspectorOpen" />

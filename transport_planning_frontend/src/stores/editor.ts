@@ -54,6 +54,7 @@ import {
 import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
+import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, pickTypeOf } from '@/core/netObjects'
 
 export type Tool =
   | 'select'
@@ -70,9 +71,45 @@ export type Tool =
   | 'connector'
   | 'lineWay'
   | 'lineStop'
+  | 'object'
+  | 'stopPoint'
+  | 'stopArea'
+  | 'stopGroup'
 
 /** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
 export type ActiveType = 'auto' | 'links' | 'nodes'
+/** Режимы окна сети: вставка, редактирование и выделение рамкой. */
+export type EditMode = 'insert' | 'edit' | 'select'
+
+export interface ConsoleEntry {
+  id: number
+  time: string
+  level: 'error' | 'warning' | 'info'
+  source: string
+  text: string
+}
+
+const INSERT_TOOLS: Record<NetObject, Tool> = {
+  nodes: 'node',
+  links: 'road',
+  turns: 'connector',
+  stopPoints: 'stopPoint',
+  stopAreas: 'stopArea',
+  stops: 'stopGroup',
+  routes: 'lineWay',
+  desiredSpeed: 'object',
+  reducedSpeed: 'object',
+  stopSigns: 'sign',
+  priorityRules: 'object',
+  signals: 'signal',
+  detectors: 'object',
+  inflows: 'object',
+}
+
+const OBJECT_OF_TOOL = new Map<Tool, NetObject>(
+  (Object.entries(INSERT_TOOLS) as [NetObject, Tool][]).filter(([, tool]) => tool !== 'object').map(([object, tool]) => [tool, object]),
+)
+const CONSOLE_LIMIT = 500
 export type LeftTab = 'network' | 'graphics' | 'filter' | 'transit' | 'issues'
 export type ListTab = 'links' | 'nodes' | 'signals' | 'lines' | 'stops' | 'zones' | 'matrix'
 export type ViewMode = 'engineering' | 'graph' | '3d' | 'sim'
@@ -118,6 +155,7 @@ const THEME_KEY = 'osm-editor-theme'
 const FILTER_KEY = 'osm-editor-filter:'
 const CRS_KEY = 'osm-editor-crs'
 const CONNECTOR_STUB_M = 25
+const STOP_GROUP_RADIUS_M = 100
 
 function readStored(key: string): string | null {
   try {
@@ -147,6 +185,12 @@ export const useEditor = defineStore('editor', () => {
   const loadError = ref<string | null>(null)
 
   const tool = ref<Tool>('select')
+  const mode = ref<EditMode>('edit')
+  const activeObject = ref<NetObject>('links')
+  const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
+  const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
+  const consoleOpen = ref(true)
+  const consoleLog = shallowRef<ConsoleEntry[]>([])
   const viewMode = ref<ViewMode>('engineering')
   const selection = shallowRef<SelectedItem[]>([])
   const presetId = ref(DEFAULT_PRESET_ID)
@@ -193,9 +237,9 @@ export const useEditor = defineStore('editor', () => {
   })
 
   const theme = ref<ThemeName>(readStored(THEME_KEY) === 'dark' ? 'dark' : 'light')
-  const activeType = ref<ActiveType>('auto')
+  const activeType = ref<ActiveType>('links')
   const leftTab = ref<LeftTab>('network')
-  const listOpen = ref(true)
+  const listOpen = ref(false)
   const listTab = ref<ListTab>('links')
   /** Узел, открытый в редакторе узла. */
   const junctionNode = ref<number | null>(null)
@@ -297,8 +341,15 @@ export const useEditor = defineStore('editor', () => {
   })
   const errorCount = computed(() => issues.value.filter((i) => i.severity === 'error').length)
 
+  let consoleId = 0
+  function logConsole(level: ConsoleEntry['level'], source: string, text: string): void {
+    const time = new Date().toLocaleTimeString('ru-RU')
+    consoleLog.value = [...consoleLog.value, { id: ++consoleId, time, level, source, text }].slice(-CONSOLE_LIMIT)
+  }
+
   let toastId = 0
   function toast(text: string, tone: Toast['tone'] = 'info'): void {
+    if (tone === 'error') logConsole('error', 'Редактор', text)
     const id = ++toastId
     toasts.value.push({ id, text, tone })
     setTimeout(() => {
@@ -577,6 +628,103 @@ export const useEditor = defineStore('editor', () => {
     speedStart.value = null
     connectorFrom.value = null
     tool.value = next
+    const object = OBJECT_OF_TOOL.get(next)
+    if (object) {
+      mode.value = 'insert'
+      if (activeObject.value !== object) chooseObject(object)
+    } else if (next === 'object' || next === 'lineStop') {
+      mode.value = 'insert'
+    } else if (next !== 'select' || mode.value === 'insert') {
+      mode.value = 'edit'
+    }
+  }
+
+  function chooseObject(next: NetObject): void {
+    activeObject.value = next
+    activeType.value = pickTypeOf(next)
+    selection.value = []
+  }
+
+  function applyInsertTool(): void {
+    if (activeObject.value === 'routes' && selectedLineId.value === null) toast('Выберите маршрут в списке или создайте новый')
+    setTool(INSERT_TOOLS[activeObject.value])
+  }
+
+  function setActiveObject(next: NetObject): void {
+    chooseObject(next)
+    if (mode.value === 'insert') applyInsertTool()
+  }
+
+  function setMode(next: EditMode): void {
+    if (next === 'insert') {
+      applyInsertTool()
+      return
+    }
+    setTool('select')
+    mode.value = next
+  }
+
+  function toggleInsert(): void {
+    setMode(mode.value === 'insert' ? 'edit' : 'insert')
+  }
+
+  /** Можно ли выбрать этот объект: объекты другого типа в режиме редактирования не реагируют. */
+  function acceptsNode(id: number): boolean {
+    const d = doc.value
+    const node = d?.nodes.get(id)
+    if (!d || !node || objectLocked[activeObject.value]) return false
+    if (activeObject.value === 'stops') return matchesNode('stopPoints', node, d) || matchesNode('stopAreas', node, d)
+    return matchesNode(activeObject.value, node, d)
+  }
+
+  function acceptsWay(id: number): boolean {
+    const way = doc.value?.ways.get(id)
+    if (!way || objectLocked[activeObject.value]) return false
+    return matchesWay(activeObject.value, way)
+  }
+
+  function placeNetObject(wayId: number, position: LatLon): void {
+    const type = activeObject.value
+    if (!isCustomObject(type)) return
+    const id = mutate('Новый объект сети', (d) => addNode(d, position, customObjectTags(type, wayId)))
+    if (id !== undefined) selectOne({ kind: 'node', id })
+  }
+
+  function addStopPoint(wayId: number, position: LatLon): void {
+    const id = mutate('Новый пункт остановки', (d, p) => {
+      const node = insertNodeOnWay(d, p, wayId, position)
+      setNodeTags(d, node, { ...(d.node(node).tags ?? {}), public_transport: 'stop_position', bus: 'yes' })
+      return node
+    })
+    if (id !== undefined) selectOne({ kind: 'node', id })
+  }
+
+  function addStopArea(position: LatLon): void {
+    const id = mutate('Новая зона остановки', (d) => addNode(d, position, { public_transport: 'platform', bus: 'yes' }))
+    if (id !== undefined) selectOne({ kind: 'node', id })
+  }
+
+  /** Остановка объединяет выбранный пункт или зону и всё, что стоит рядом. */
+  function addStopFromNode(nodeId: number): void {
+    const d = doc.value
+    const p = projector.value
+    const base = d?.nodes.get(nodeId)
+    if (!d || !p || !base) return
+    const origin = p.toXY(base)
+    const members: number[] = []
+    for (const node of d.nodes.values()) {
+      if (!matchesNode('stopPoints', node, d) && !matchesNode('stopAreas', node, d)) continue
+      const point = p.toXY(node)
+      if (Math.hypot(point.x - origin.x, point.y - origin.y) <= STOP_GROUP_RADIUS_M) members.push(node.id)
+    }
+    mutate('Новая остановка', (target) => {
+      target.putRelation({
+        id: target.newId(),
+        members: members.map((id) => ['node', id, target.node(id).tags?.public_transport === 'platform' ? 'platform' : 'stop']),
+        tags: { type: 'public_transport', public_transport: 'stop_area', name: base.tags?.name ?? `Остановка ${nodeId}` },
+      })
+    })
+    toast(`Остановка создана, объектов в ней: ${members.length}`, 'success')
   }
 
   function focusOn(position: LatLon, zoomLevel?: number): void {
@@ -962,6 +1110,22 @@ export const useEditor = defineStore('editor', () => {
     activeType,
     leftTab,
     listOpen,
+    mode,
+    activeObject,
+    objectHidden,
+    objectLocked,
+    consoleOpen,
+    consoleLog,
+    logConsole,
+    setMode,
+    setActiveObject,
+    toggleInsert,
+    acceptsNode,
+    acceptsWay,
+    placeNetObject,
+    addStopPoint,
+    addStopArea,
+    addStopFromNode,
     listTab,
     junctionNode,
     junctionTab,

@@ -21,6 +21,10 @@ const TOOL_HINTS: Record<string, string> = {
   tunnel: 'Щелчок по дороге отмечает тоннель. Чтобы отметить часть, сначала разрежьте дорогу',
   lineWay: 'Щёлкайте по дорогам по порядку следования маршрута',
   lineStop: 'Щелчок по дороге создаёт остановку, по существующему узлу добавляет её в маршрут',
+  object: 'Щелчок по дороге ставит объект активного типа. Insert возвращает к редактированию',
+  stopPoint: 'Щелчок по дороге создаёт пункт остановки',
+  stopArea: 'Щелчок по карте создаёт зону остановки',
+  stopGroup: 'Щелчок по пункту или зоне объединяет в остановку всё, что стоит рядом',
 }
 
 const hint = computed(() => (editor.viewMode === 'sim' ? 'Режим расчёта: граф не редактируется. Пробел ставит микромодель на паузу' : (TOOL_HINTS[editor.tool] ?? '')))
@@ -68,7 +72,7 @@ const scale = computed(() => {
     <span class="cell" :class="editor.saveState">{{ saveLabel }}</span>
     <span class="cell">Правок {{ editor.changeCount }}</span>
     <span v-if="hiddenCount" class="cell">Скрыто {{ hiddenCount }}</span>
-    <button v-if="editor.errorCount" class="cell link" @click="(editor.navigatorOpen = true), (editor.leftTab = 'issues')">Ошибок {{ editor.errorCount }}</button>
+    <button v-if="editor.errorCount" class="cell link" @click="editor.consoleOpen = true">Ошибок {{ editor.errorCount }}</button>
     <span class="cell wide">{{ counts }}</span>
     <span class="cell mono">{{ position }}</span>
     <select v-model="editor.crs" class="crs" aria-label="Система координат" title="Система координат">

@@ -32,6 +32,15 @@ const separator: MenuItem = { separator: true }
 
 function openLeft(tab: typeof editor.leftTab): void {
   editor.navigatorOpen = true
+  if (tab === 'issues') {
+    editor.consoleOpen = true
+    return
+  }
+  if (tab === 'transit') {
+    editor.leftTab = 'network'
+    editor.setActiveObject('routes')
+    return
+  }
   editor.leftTab = tab
 }
 

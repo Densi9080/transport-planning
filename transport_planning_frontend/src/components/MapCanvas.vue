@@ -13,7 +13,7 @@ import {
 import 'maplibre-gl/dist/maplibre-gl.css'
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import type { Feature, FeatureCollection } from 'geojson'
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { bearing, dist, nearestOnSegment, offsetPolyline, polylineLength, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
@@ -22,7 +22,8 @@ import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { lineSegments } from '@/core/transit'
-import type { LatLon, XY } from '@/core/types'
+import { CUSTOM_TYPES, type CustomObject, customObjectOf, TP_TYPE } from '@/core/netObjects'
+import type { LatLon, ONode, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
 import { CarLayer } from '@/map/carLayer'
 import {
@@ -39,13 +40,14 @@ import {
 import { parseSpeed } from '@/sim/macro'
 import { losFromSpeedRatio } from '@/sim/micro'
 import { signalState } from '@/sim/net'
-import { type DrawPoint, useEditor } from '@/stores/editor'
+import { type DrawPoint, type SelectedItem, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
 
 // Сам MapLibre ищет воркер рядом со своим модулем, а после сборки его там нет
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+const MIN_BOX_PX = 4
 const SIGNAL_PICK_PX = 6
 const SEGMENT_PICK_PX = 7
 const SNAP_PX = 13
@@ -61,6 +63,18 @@ const editor = useEditor()
 const sim = useSimulation()
 const container = ref<HTMLDivElement | null>(null)
 const hud = ref<{ x: number; y: number; text: string }[]>([])
+const selectionBox = ref<{ left: number; top: number; width: number; height: number } | null>(null)
+let boxStart: { x: number; y: number } | null = null
+let boxShift = false
+const customNodes = computed(() => {
+  void editor.rev
+  const result: { node: ONode; type: CustomObject }[] = []
+  for (const node of editor.doc?.nodes.values() ?? []) {
+    const type = customObjectOf(node.tags)
+    if (type) result.push({ node, type })
+  }
+  return result
+})
 
 interface HitNode {
   kind: 'node'
@@ -138,10 +152,33 @@ function metersPerPixel(lngLat: LngLat): number {
   return dist(projector.toXY({ lat: lngLat.lat, lon: lngLat.lng }), projector.toXY({ lat: b.lat, lon: b.lng }))
 }
 
+/** Тип объектов важен только при выборе. Инструменты вставки сами решают, куда их можно поставить. */
+function pickType(): 'auto' | 'links' | 'nodes' {
+  if (editor.tool === 'select') return editor.activeType
+  return ['object', 'stopPoint', 'lineWay', 'bridge', 'tunnel'].includes(editor.tool) ? 'links' : 'auto'
+}
+
+/** Объекты вне дорог не входят в кэш дорог, поэтому ищем их отдельно. */
+function pickFreeObject(p: XY, mpp: number): HitNode | null {
+  if (editor.tool !== 'select' && editor.tool !== 'stopGroup') return null
+  const doc = editor.doc!
+  let best: HitNode | null = null
+  let distance = NODE_PICK_PX * mpp
+  for (const node of doc.nodes.values()) {
+    if (doc.waysOfNode(node.id).length > 0 || !editor.acceptsNode(node.id)) continue
+    const d = dist(editor.projector!.toXY(node), p)
+    if (d < distance) {
+      distance = d
+      best = { kind: 'node', id: node.id }
+    }
+  }
+  return best
+}
+
 function pickableNode(id: number): boolean {
   const doc = editor.doc!
   if (editor.hidden.nodes.has(id)) return false
-  if (editor.activeType === 'nodes') return true
+  if (pickType() === 'nodes') return true
   if (editor.selection.some((item) => item.kind === 'node' && item.id === id)) return true
   const node = doc.nodes.get(id)
   if (node?.tags?.highway || node?.tags?.traffic_calming) return true
@@ -155,6 +192,9 @@ function pick(lngLat: LngLat): Hit | null {
   refreshWayCache()
   const p = projector.toXY({ lat: lngLat.lat, lon: lngLat.lng })
   const mpp = metersPerPixel(lngLat)
+  const type = pickType()
+  const free = pickFreeObject(p, mpp)
+  if (free) return free
 
   const selectedWayIds = new Set(editor.selectedWays.map((way) => way.id))
 
@@ -181,7 +221,7 @@ function pick(lngLat: LngLat): Hit | null {
       }
     })
   }
-  if (bestHandle && editor.activeType !== 'links') return bestHandle
+  if (bestHandle && (type !== 'links' || editor.tool === 'select')) return bestHandle
 
   let nodeHit: HitNode | null = null
   let nodeDistance = NODE_PICK_PX * mpp
@@ -197,8 +237,8 @@ function pick(lngLat: LngLat): Hit | null {
       }
     })
   }
-  if (nodeHit && editor.activeType !== 'links') return nodeHit
-  if (editor.activeType === 'nodes') return null
+  if (nodeHit && type !== 'links') return nodeHit
+  if (type === 'nodes') return null
 
   let wayHit: HitWay | null = null
   let score = Number.POSITIVE_INFINITY
@@ -458,6 +498,9 @@ function renderOverlay(): void {
       }
     })
   }
+  for (const { node, type } of customNodes.value) {
+    if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
+  }
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
 
   // Предложения помощника видны на карте, пока человек не решил, применять ли их
@@ -558,6 +601,12 @@ function constrained(lngLat: LngLat, shift: boolean): LatLon {
 }
 
 function onMouseMove(event: MapMouseEvent): void {
+  if (boxStart) {
+    const left = Math.min(boxStart.x, event.point.x)
+    const top = Math.min(boxStart.y, event.point.y)
+    selectionBox.value = { left, top, width: Math.abs(event.point.x - boxStart.x), height: Math.abs(event.point.y - boxStart.y) }
+    return
+  }
   const original = event.originalEvent
   if (drag) {
     const dx = event.point.x - drag.startPoint.x
@@ -601,7 +650,7 @@ function onMouseMove(event: MapMouseEvent): void {
   const changed = JSON.stringify(next) !== JSON.stringify(hover)
   hover = next
   const canvas = map!.getCanvas()
-  if (editor.tool === 'select') canvas.style.cursor = next ? (next.kind === 'way' ? 'pointer' : 'move') : ''
+  if (editor.tool === 'select' && editor.mode !== 'select') canvas.style.cursor = next ? (next.kind === 'way' ? 'pointer' : 'move') : ''
   else canvas.style.cursor = 'crosshair'
   if (changed) scheduleOverlay()
 }
@@ -636,8 +685,39 @@ function portAt(lngLat: LngLat): LanePort | null {
   return best
 }
 
+function finishBox(): void {
+  const box = selectionBox.value
+  boxStart = null
+  selectionBox.value = null
+  map!.dragPan.enable()
+  if (!box || (box.width < MIN_BOX_PX && box.height < MIN_BOX_PX)) return
+  suppressClick = true
+  setTimeout(() => (suppressClick = false), 0)
+  const doc = editor.doc!
+  const inside = (node: LatLon): boolean => {
+    const screen = map!.project([node.lon, node.lat])
+    return screen.x >= box.left && screen.x <= box.left + box.width && screen.y >= box.top && screen.y <= box.top + box.height
+  }
+  const items: SelectedItem[] = []
+  for (const node of doc.nodes.values()) if (editor.acceptsNode(node.id) && inside(node)) items.push({ kind: 'node', id: node.id })
+  for (const way of doc.ways.values()) {
+    if (!editor.acceptsWay(way.id)) continue
+    if (way.nds.some((nd) => { const node = doc.nodes.get(nd); return !!node && inside(node) })) items.push({ kind: 'way', id: way.id })
+  }
+  const merged = boxShift ? [...editor.selection, ...items.filter((item) => !editor.selection.some((old) => old.kind === item.kind && old.id === item.id))] : items
+  editor.select(merged)
+  editor.toast(`Выделено объектов: ${merged.length}`)
+}
+
 function onMouseDown(event: MapMouseEvent): void {
   if (editor.viewMode === 'sim') return
+  if (editor.mode === 'select' && event.originalEvent.button === 0) {
+    boxStart = { x: event.point.x, y: event.point.y }
+    boxShift = event.originalEvent.shiftKey
+    map!.dragPan.disable()
+    event.preventDefault()
+    return
+  }
   if (editor.tool === 'connector' && event.originalEvent.button === 0) {
     const port = portAt(event.lngLat)
     if (port?.incoming) {
@@ -675,6 +755,10 @@ function onMouseDown(event: MapMouseEvent): void {
 }
 
 function onMouseUp(event: MapMouseEvent): void {
+  if (boxStart) {
+    finishBox()
+    return
+  }
   if (portDragging) {
     portDragging = false
     portCursor = null
@@ -702,7 +786,7 @@ function onMouseUp(event: MapMouseEvent): void {
   setTimeout(() => (suppressClick = false), 0)
 
   try {
-    const snap = finished.snap
+    const snap = doc.node(finished.nodeId).tags?.[TP_TYPE] ? null : finished.snap
     if (snap?.nodeId !== undefined) {
       mergeNodes(doc, snap.nodeId, finished.nodeId)
       editor.selectOne({ kind: 'node', id: snap.nodeId })
@@ -738,15 +822,33 @@ function onClick(event: MapMouseEvent): void {
   const hit = pick(event.lngLat)
 
   switch (editor.tool) {
-    case 'select':
+    case 'select': {
       if (hit?.kind === 'mid') return
-      if (!hit) {
+      const isSim = editor.viewMode === 'sim'
+      // Вершины выбранного отрезка двигают мышью, щелчок по ним не должен менять выбор
+      if (hit?.kind === 'node' && editor.activeObject === 'links' && !isSim) return
+      const accepted = hit && (isSim || (hit.kind === 'node' ? editor.acceptsNode(hit.id) : editor.acceptsWay(hit.id)))
+      if (!accepted) {
         if (!original.shiftKey) editor.select([])
       } else {
         const item = hit.kind === 'node' ? { kind: 'node' as const, id: hit.id } : { kind: 'way' as const, id: (hit as HitWay).id }
         if (original.shiftKey) editor.toggleSelect(item)
         else editor.selectOne(item)
       }
+      break
+    }
+    case 'object':
+      if (hit?.kind === 'way') editor.placeNetObject(hit.id, editor.projector!.toLatLon(hit.point))
+      break
+    case 'stopPoint':
+      if (hit?.kind === 'way') editor.addStopPoint(hit.id, editor.projector!.toLatLon(hit.point))
+      break
+    case 'stopArea':
+      editor.addStopArea(position)
+      break
+    case 'stopGroup':
+      if (hit?.kind === 'node' && editor.acceptsNode(hit.id)) editor.addStopFromNode(hit.id)
+      else editor.toast('Щёлкните по пункту или зоне остановки')
       break
     case 'node':
       if (hit?.kind === 'way') editor.addNodeOnWay(hit.id, editor.projector!.toLatLon(hit.point))
@@ -1353,6 +1455,12 @@ watch(() => sim.micro, () => {
   syncCars()
   applyLoadColors()
 })
+watch(() => editor.mode, (mode) => {
+  if (!map) return
+  map.getCanvas().style.cursor = mode === 'select' || editor.tool !== 'select' ? 'crosshair' : ''
+  if (mode === 'select') map.boxZoom.disable()
+  else map.boxZoom.enable()
+})
 watch(() => editor.focusRequest, (request) => {
   if (!request || !map) return
   map.easeTo({
@@ -1369,6 +1477,11 @@ defineExpose({ fitToBounds })
   <div class="map-wrap">
     <div ref="container" class="map" />
     <div
+      v-if="selectionBox"
+      class="selection-box"
+      :style="{ left: `${selectionBox.left}px`, top: `${selectionBox.top}px`, width: `${selectionBox.width}px`, height: `${selectionBox.height}px` }"
+    />
+    <div
       v-for="(label, index) in hud"
       :key="index"
       class="hud-label"
@@ -1384,6 +1497,12 @@ defineExpose({ fitToBounds })
 .map {
   position: absolute;
   inset: 0;
+}
+.selection-box {
+  position: absolute;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px dashed var(--accent);
+  pointer-events: none;
 }
 .hud-label {
   position: absolute;
