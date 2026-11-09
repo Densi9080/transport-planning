@@ -127,6 +127,7 @@ function onKeyDown(event: KeyboardEvent): void {
 
   if (key === 'escape') {
     if (editor.drawPoints.length > 0) editor.drawPoints = []
+    else if (editor.selectPolygon.length > 0) editor.selectPolygon = []
     else if (editor.speedStart) editor.speedStart = null
     else if (editor.crossingStart) editor.crossingStart = null
     else if (editor.connectorFrom) editor.connectorFrom = null

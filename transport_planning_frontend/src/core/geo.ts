@@ -133,6 +133,17 @@ export interface SegmentHit {
   t: number
 }
 
+/** Лежит ли точка внутри многоугольника: подсчёт пересечений луча с рёбрами. */
+export function pointInPolygon(point: XY, polygon: XY[]): boolean {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i]!
+    const b = polygon[j]!
+    if (a.y > point.y !== b.y > point.y && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x) inside = !inside
+  }
+  return inside
+}
+
 export function nearestOnSegment(p: XY, a: XY, b: XY): SegmentHit {
   const ab = sub(b, a)
   const lenSq = dot(ab, ab)

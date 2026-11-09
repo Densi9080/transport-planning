@@ -85,6 +85,7 @@ export type Tool =
 export type ActiveType = 'auto' | 'links' | 'nodes'
 /** Режимы окна сети: вставка, редактирование и выделение рамкой. */
 export type EditMode = 'insert' | 'edit' | 'select'
+export type SelectShape = 'box' | 'polygon' | 'circle'
 
 export interface NewLinkAttrs {
   id: number
@@ -219,6 +220,8 @@ export const useEditor = defineStore('editor', () => {
   const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
   const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
   const consoleOpen = ref(true)
+  const selectShape = ref<SelectShape>('box')
+  const selectPolygon = shallowRef<XY[]>([])
   const deleteRequest = shallowRef<{ items: SelectedItem[]; label: string } | null>(null)
   const pendingRoad = shallowRef<{ points: DrawPoint[] } | null>(null)
   const crossingStart = shallowRef<LatLon | null>(null)
@@ -857,6 +860,18 @@ export const useEditor = defineStore('editor', () => {
     deleteRequest.value = null
   }
 
+  /** Выделяет все объекты активного типа, кроме уже выделенных. */
+  function invertSelection(): void {
+    const d = doc.value
+    if (!d) return
+    const current = new Set(selection.value.map((item) => `${item.kind}${item.id}`))
+    const next: SelectedItem[] = []
+    for (const node of d.nodes.values()) if (acceptsNode(node.id) && !current.has(`node${node.id}`)) next.push({ kind: 'node', id: node.id })
+    for (const way of d.ways.values()) if (acceptsWay(way.id) && !current.has(`way${way.id}`)) next.push({ kind: 'way', id: way.id })
+    selection.value = next
+    toast(`Выделено объектов: ${next.length}`)
+  }
+
   function chooseObject(next: NetObject): void {
     selectedTurn.value = null
     activeObject.value = next
@@ -1407,6 +1422,9 @@ export const useEditor = defineStore('editor', () => {
     objectHidden,
     objectLocked,
     consoleOpen,
+    selectShape,
+    selectPolygon,
+    invertSelection,
     deleteRequest,
     requestDelete,
     requestDeleteSelection,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Activity, BoxSelect, Save, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
+import { Activity, BoxSelect, Circle, Contrast, Pentagon, Save, Square, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
 
-import { type EditMode, useEditor } from '@/stores/editor'
+import { type EditMode, type SelectShape, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
 import { useTraffic } from '@/stores/traffic'
 
@@ -14,6 +14,17 @@ const modes: { id: EditMode; label: string; hint: string; icon: typeof Pencil }[
   { id: 'edit', label: 'Редактирование', hint: 'Выбирать, двигать и удалять объекты активного типа (Insert)', icon: Pencil },
   { id: 'select', label: 'Выделение', hint: 'Выделять рамкой объекты активного типа', icon: BoxSelect },
 ]
+
+const shapes: { id: SelectShape; label: string; hint: string; icon: typeof Square }[] = [
+  { id: 'box', label: 'Прямоугольник', hint: 'Потяните мышью рамку', icon: Square },
+  { id: 'polygon', label: 'Полигон', hint: 'Щелчки ставят вершины, двойной щелчок или правая кнопка завершает, Esc отменяет', icon: Pentagon },
+  { id: 'circle', label: 'Радиус', hint: 'Нажмите в центре и потяните до нужного радиуса', icon: Circle },
+]
+
+function chooseShape(shape: SelectShape): void {
+  editor.selectPolygon = []
+  editor.selectShape = shape
+}
 
 function toggleSim(): void {
   if (editor.viewMode === 'sim') editor.viewMode = 'engineering'
@@ -44,7 +55,20 @@ function toggleSim(): void {
         {{ mode.label }}
       </button>
     </div>
-    <button v-else class="btn small" :class="{ primary: !sim.running }" :disabled="sim.level !== 'micro'" @click="sim.togglePlay">
+    <template v-if="editor.viewMode !== 'sim' && editor.mode === 'select'">
+      <span class="sep" />
+      <div class="segmented modes" role="group" aria-label="Форма выделения">
+        <button v-for="shape in shapes" :key="shape.id" :class="{ active: editor.selectShape === shape.id }" :aria-pressed="editor.selectShape === shape.id" :title="shape.hint" @click="chooseShape(shape.id)">
+          <component :is="shape.icon" :size="13" aria-hidden="true" />
+          {{ shape.label }}
+        </button>
+      </div>
+      <button class="btn small invert" title="Выделить все объекты активного типа, кроме уже выделенных" @click="editor.invertSelection">
+        <Contrast :size="13" aria-hidden="true" />
+        Обратить выделение
+      </button>
+    </template>
+    <button v-if="editor.viewMode === 'sim'" class="btn small" :class="{ primary: !sim.running }" :disabled="sim.level !== 'micro'" @click="sim.togglePlay">
       <Pause v-if="sim.running" :size="13" aria-hidden="true" />
       <Play v-else :size="13" aria-hidden="true" />
       {{ sim.running ? 'Пауза' : 'Запуск' }}
@@ -124,7 +148,8 @@ function toggleSim(): void {
   margin: 0 4px;
   background: var(--line-strong);
 }
-.modes {
+.modes,
+.invert {
   flex: none;
 }
 .trips {

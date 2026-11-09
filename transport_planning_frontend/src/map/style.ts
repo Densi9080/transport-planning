@@ -521,6 +521,14 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-width': 2,
       'circle-stroke-color': '#ffffff',
     } },
+    { id: 'overlay-select-fill', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'select-area'], paint: {
+      'fill-color': 'rgba(56,189,248,0.14)',
+    } },
+    { id: 'overlay-select-line', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'select-area'], paint: {
+      'line-color': COLORS.accentSoft,
+      'line-width': 1.5,
+      'line-dasharray': [3, 2],
+    } },
     { id: 'overlay-band', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'band'], layout: { 'line-cap': 'round' }, paint: {
       'line-color': '#facc15',
       'line-width': 2,

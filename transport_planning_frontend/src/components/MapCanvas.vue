@@ -15,7 +15,7 @@ import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import type { Feature, FeatureCollection } from 'geojson'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import { bearing, dist, nearestOnSegment, offsetPolyline, polylineLength, sub, unit } from '@/core/geo'
+import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
 import type { LanePort } from '@/core/lanePick'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
@@ -51,6 +51,7 @@ import { useTraffic } from '@/stores/traffic'
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+const CIRCLE_POINTS = 72
 /** Выше этой отметки машина уже на мосту и должна быть видна поверх него. */
 const BRIDGE_CAR_Z_M = 1.5
 const TURN_PICK_PX = 5
@@ -81,6 +82,8 @@ const coordMenu = ref<{ x: number; y: number; lat: number; lon: number } | null>
 const selectionBox = ref<{ left: number; top: number; width: number; height: number } | null>(null)
 let boxStart: { x: number; y: number } | null = null
 let boxShift = false
+let circleDrag: { center: XY; radius: number } | null = null
+let polygonCursor: XY | null = null
 const customNodes = computed(() => {
   void editor.rev
   const result: { node: ONode; type: CustomObject }[] = []
@@ -541,6 +544,7 @@ function renderOverlay(): void {
   for (const { node, type } of customNodes.value) {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
+  renderSelectShapes(features)
   const turnView = editor.turnPreview
   if (turnView) {
     for (const path of turnView.paths) features.push(lineOf(path, { role: 'turn-selected' }))
@@ -630,8 +634,36 @@ function editLabels(): { x: number; y: number; text: string }[] {
       })
     }
   }
+  if (circleDrag && circleDrag.radius > 0) {
+    const position = projector.toLatLon(circleDrag.center)
+    const screen = map!.project([position.lon, position.lat])
+    labels.push({ x: screen.x, y: screen.y - 18, text: `R ${circleDrag.radius.toFixed(1)} м` })
+  }
   if (editor.tool === 'crossing' && editor.crossingStart && leash) labels.push(segmentLabel(projector.toXY(editor.crossingStart), leash.cursor))
   return labels
+}
+
+function selectAreaFeature(points: XY[]): Feature {
+  const ring = [...points, points[0]!].map((point) => editor.projector!.toLngLat(point))
+  return { type: 'Feature', properties: { role: 'select-area' }, geometry: { type: 'Polygon', coordinates: [ring] } }
+}
+
+function renderSelectShapes(features: Feature[]): void {
+  if (circleDrag && circleDrag.radius > 0) {
+    const { center, radius } = circleDrag
+    features.push(selectAreaFeature(Array.from({ length: CIRCLE_POINTS }, (_, i) => {
+      const angle = (i / CIRCLE_POINTS) * Math.PI * 2
+      return { x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius }
+    })))
+    features.push(pointOf(editor.projector!.toLatLon(center), { role: 'draw-point' }))
+  }
+  const polygon = editor.selectPolygon
+  if (polygon.length > 0) {
+    const outline = polygonCursor ? [...polygon, polygonCursor] : polygon
+    if (outline.length >= 3) features.push(selectAreaFeature(outline))
+    else if (outline.length === 2) features.push(lineOf(outline, { role: 'band' }))
+    for (const point of polygon) features.push(pointOf(editor.projector!.toLatLon(point), { role: 'draw-point' }))
+  }
 }
 
 function formatAngle(from: XY, to: XY): string {
@@ -690,6 +722,16 @@ function constrained(lngLat: LngLat, shift: boolean): LatLon {
 }
 
 function onMouseMove(event: MapMouseEvent): void {
+  if (circleDrag) {
+    circleDrag.radius = dist(circleDrag.center, editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng }))
+    scheduleOverlay()
+    return
+  }
+  if (editor.mode === 'select' && editor.selectPolygon.length > 0) {
+    polygonCursor = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
+    scheduleOverlay()
+    return
+  }
   if (boxStart) {
     const left = Math.min(boxStart.x, event.point.x)
     const top = Math.min(boxStart.y, event.point.y)
@@ -812,11 +854,38 @@ function finishBox(): void {
   if (!box || (box.width < MIN_BOX_PX && box.height < MIN_BOX_PX)) return
   suppressClick = true
   setTimeout(() => (suppressClick = false), 0)
-  const doc = editor.doc!
-  const inside = (node: LatLon): boolean => {
+  selectInside((node) => {
     const screen = map!.project([node.lon, node.lat])
     return screen.x >= box.left && screen.x <= box.left + box.width && screen.y >= box.top && screen.y <= box.top + box.height
+  })
+}
+
+function finishCircle(): void {
+  const circle = circleDrag!
+  circleDrag = null
+  scheduleOverlay()
+  if (circle.radius < MIN_BOX_PX * metersPerPixel(map!.getCenter())) return
+  suppressClick = true
+  setTimeout(() => (suppressClick = false), 0)
+  const projector = editor.projector!
+  selectInside((node) => dist(projector.toXY(node), circle.center) <= circle.radius)
+}
+
+function finishPolygon(): void {
+  const polygon = editor.selectPolygon
+  editor.selectPolygon = []
+  polygonCursor = null
+  if (polygon.length < 3) {
+    editor.toast('Для полигона нужно хотя бы три точки')
+    return
   }
+  const projector = editor.projector!
+  selectInside((node) => pointInPolygon(projector.toXY(node), polygon))
+}
+
+/** Отбирает объекты активного типа. Дорога попадает в выделение, если внутри есть хотя бы один её узел. */
+function selectInside(inside: (node: LatLon) => boolean): void {
+  const doc = editor.doc!
   const items: SelectedItem[] = []
   for (const node of doc.nodes.values()) if (editor.acceptsNode(node.id) && inside(node)) items.push({ kind: 'node', id: node.id })
   for (const way of doc.ways.values()) {
@@ -833,9 +902,14 @@ function onMouseDown(event: MapMouseEvent): void {
   coordMenu.value = null
   if (editor.viewMode === 'sim') return
   if (editor.mode === 'select' && event.originalEvent.button === 0) {
-    boxStart = { x: event.point.x, y: event.point.y }
     boxShift = event.originalEvent.shiftKey
     event.preventDefault()
+    if (editor.selectShape === 'polygon') return
+    if (editor.selectShape === 'circle') {
+      circleDrag = { center: editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng }), radius: 0 }
+      return
+    }
+    boxStart = { x: event.point.x, y: event.point.y }
     return
   }
   if (editor.tool === 'connector' && event.originalEvent.button === 0) {
@@ -873,6 +947,10 @@ function onMouseDown(event: MapMouseEvent): void {
 }
 
 function onMouseUp(event: MapMouseEvent): void {
+  if (circleDrag) {
+    finishCircle()
+    return
+  }
   if (boxStart) {
     finishBox()
     return
@@ -923,6 +1001,13 @@ function onMouseUp(event: MapMouseEvent): void {
 
 function onClick(event: MapMouseEvent): void {
   if (suppressClick) return
+  if (editor.mode === 'select' && editor.selectShape === 'polygon' && editor.viewMode !== 'sim') {
+    const point = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
+    const last = editor.selectPolygon.at(-1)
+    if (!last || dist(last, point) > MIN_BOX_PX * metersPerPixel(event.lngLat)) editor.selectPolygon = [...editor.selectPolygon, point]
+    polygonCursor = point
+    return
+  }
   const original = event.originalEvent
   // Сигнал в симуляции стоит на стоп-линии, а не в узле: щелчок по нему выбирает весь светофор
   if (editor.viewMode === 'sim' && map?.getLayer('sim-signals')) {
@@ -1058,6 +1143,11 @@ function addDrawPoint(event: MapMouseEvent): void {
 }
 
 function onDoubleClick(event: MapMouseEvent): void {
+  if (editor.mode === 'select' && editor.selectShape === 'polygon' && editor.selectPolygon.length > 0) {
+    event.preventDefault()
+    finishPolygon()
+    return
+  }
   if (editor.tool === 'delete') {
     event.preventDefault()
     const hit = pick(event.lngLat)
@@ -1563,6 +1653,11 @@ onMounted(() => {
   })
   instance.on('click', onClick)
   instance.on('contextmenu', (event) => {
+    if (editor.mode === 'select' && editor.selectPolygon.length > 0) {
+      event.preventDefault()
+      finishPolygon()
+      return
+    }
     const inserting = editor.drawPoints.length > 0 || !!editor.crossingStart || !!editor.connectorFrom || !!editor.speedStart
     insertMenu.value = inserting ? { x: event.point.x, y: event.point.y } : null
     coordMenu.value = editor.tool === 'pan' ? { x: event.point.x, y: event.point.y, lat: event.lngLat.lat, lon: event.lngLat.lng } : null
@@ -1680,6 +1775,7 @@ function renderTraffic(): void {
 
 watch(() => [traffic.result, traffic.visible], renderTraffic)
 watch(() => editor.selectedLane, () => scheduleOverlay())
+watch(() => editor.selectPolygon, () => scheduleOverlay())
 watch(() => editor.turnPreview, () => scheduleOverlay())
 watch(() => ({ ...editor.objectHidden }), () => {
   applyView()

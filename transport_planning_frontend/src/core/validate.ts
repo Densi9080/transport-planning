@@ -42,8 +42,8 @@ export interface Issue {
 
 export const ISSUE_TITLES: Record<IssueCode, string> = {
   isolated: 'Изолированные участки',
-  no_exit: 'Из узла нельзя выехать',
-  no_entry: 'В узел нельзя въехать',
+  no_exit: 'Конец односторонней дороги',
+  no_entry: 'Начало односторонней дороги',
   head_on: 'Встречные односторонние дороги',
   lanes_turn_mismatch: 'Манёвров не столько, сколько полос',
   lanes_sum_mismatch: 'Сумма полос не сходится',
@@ -349,8 +349,9 @@ function checkDirections({ doc, ways, issues, isNearBorder }: Context): void {
     } else if (degreeOut === 0 && degreeIn > 0) {
       issues.push({
         id: `noexit-${nodeId}`,
+        // Тупики и обрывы односторонних бывают на самом деле, поэтому это заметка, а не ошибка
         code: 'no_exit',
-        severity: 'warning',
+        severity: 'info',
         message: `Конец односторонней дороги: выезда нет (${ins.map(label).join(', ')})`,
         position,
         wayIds: ins.map((way) => way.id),
@@ -360,7 +361,7 @@ function checkDirections({ doc, ways, issues, isNearBorder }: Context): void {
       issues.push({
         id: `noentry-${nodeId}`,
         code: 'no_entry',
-        severity: 'warning',
+        severity: 'info',
         message: `Начало односторонней дороги: въезда нет (${outs.map(label).join(', ')})`,
         position,
         wayIds: outs.map((way) => way.id),
