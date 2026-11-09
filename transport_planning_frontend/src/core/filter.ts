@@ -1,4 +1,6 @@
 import type { OsmDoc } from './doc'
+import { isDrivable, parseProfile, totalWidth } from './lanes'
+import { ROAD_TYPES } from './presets'
 import type { Network } from './topology'
 import type { Tags } from './types'
 
@@ -7,7 +9,9 @@ import type { Tags } from './types'
  * Меняет только отображение: скрытый объект остаётся в графе, в симуляции и в экспорте.
  */
 
-export type FilterOp = 'exists' | 'missing' | 'eq' | 'ne' | 'contains' | 'gt' | 'lt'
+export type FilterOp = 'exists' | 'missing' | 'eq' | 'ne' | 'contains' | 'gt' | 'ge' | 'lt' | 'le'
+export type FilterMode = 'hide' | 'only'
+export type FilterLogic = 'any' | 'all'
 
 export interface FilterRule {
   id: number
@@ -24,11 +28,69 @@ export const FILTER_OPS: { id: FilterOp; label: string; needsValue: boolean }[] 
   { id: 'ne', label: '≠', needsValue: true },
   { id: 'contains', label: 'содержит', needsValue: true },
   { id: 'gt', label: '>', needsValue: true },
+  { id: 'ge', label: '≥', needsValue: true },
   { id: 'lt', label: '<', needsValue: true },
+  { id: 'le', label: '≤', needsValue: true },
 ]
 
+export type FieldKind = 'enum' | 'number' | 'text' | 'flag'
+
+export interface FilterField {
+  key: string
+  label: string
+  kind: FieldKind
+}
+
+/** Атрибуты на языке транспортника. Ключи с @ вычисляются: в OSM число полос часто не записано. */
+export const FILTER_FIELDS: FilterField[] = [
+  { key: 'highway', label: 'Тип дороги', kind: 'enum' },
+  { key: 'name', label: 'Название', kind: 'text' },
+  { key: '@lanes', label: 'Число полос', kind: 'number' },
+  { key: '@width', label: 'Ширина проезжей части, м', kind: 'number' },
+  { key: 'maxspeed', label: 'Разрешённая скорость, км/ч', kind: 'number' },
+  { key: 'oneway', label: 'Одностороннее движение', kind: 'flag' },
+  { key: 'bridge', label: 'Мост', kind: 'flag' },
+  { key: 'tunnel', label: 'Тоннель', kind: 'flag' },
+  { key: 'surface', label: 'Покрытие', kind: 'enum' },
+  { key: 'lit', label: 'Освещение', kind: 'enum' },
+  { key: 'building', label: 'Здание', kind: 'flag' },
+  { key: '*', label: 'Другой тег OSM', kind: 'text' },
+]
+
+export const OPS_BY_KIND: Record<FieldKind, FilterOp[]> = {
+  enum: ['eq', 'ne', 'exists', 'missing'],
+  number: ['ge', 'le', 'eq', 'ne', 'gt', 'lt'],
+  text: ['contains', 'eq', 'ne', 'exists', 'missing'],
+  flag: ['exists', 'missing'],
+}
+
+export function fieldOf(key: string): FilterField {
+  return FILTER_FIELDS.find((field) => field.key === key) ?? FILTER_FIELDS.at(-1)!
+}
+
+export function opNeedsValue(op: FilterOp): boolean {
+  return FILTER_OPS.find((item) => item.id === op)?.needsValue ?? false
+}
+
+export function opLabel(op: FilterOp, kind: FieldKind): string {
+  if (kind === 'flag') return op === 'exists' ? 'есть' : 'нет'
+  return FILTER_OPS.find((item) => item.id === op)?.label ?? op
+}
+
+export function valueLabel(key: string, value: string): string {
+  return key === 'highway' ? (ROAD_TYPES.find((type) => type.value === value)?.label ?? value) : value
+}
+
+function fieldValue(tags: Tags | undefined, key: string): string | undefined {
+  if (!key.startsWith('@')) return tags?.[key]
+  if (!tags || !isDrivable(tags)) return undefined
+  const profile = parseProfile(tags)
+  if (key === '@lanes') return String(profile.forward + profile.backward)
+  return key === '@width' ? totalWidth(profile).toFixed(2) : undefined
+}
+
 export function matchesRule(tags: Tags | undefined, rule: FilterRule): boolean {
-  const value = tags?.[rule.key]
+  const value = fieldValue(tags, rule.key)
   switch (rule.op) {
     case 'exists':
       return value !== undefined
@@ -41,11 +103,15 @@ export function matchesRule(tags: Tags | undefined, rule: FilterRule): boolean {
     case 'contains':
       return value !== undefined && value.toLowerCase().includes(rule.value.toLowerCase())
     case 'gt':
-    case 'lt': {
+    case 'ge':
+    case 'lt':
+    case 'le': {
       const number = Number.parseFloat(value ?? '')
       const limit = Number.parseFloat(rule.value)
       if (!Number.isFinite(number) || !Number.isFinite(limit)) return false
-      return rule.op === 'gt' ? number > limit : number < limit
+      if (rule.op === 'gt') return number > limit
+      if (rule.op === 'ge') return number >= limit
+      return rule.op === 'lt' ? number < limit : number <= limit
     }
   }
 }
@@ -64,16 +130,38 @@ export interface HiddenSets {
 
 export const NOTHING_HIDDEN: HiddenSets = { ways: new Set(), nodes: new Set() }
 
-export function computeHidden(doc: OsmDoc, rules: FilterRule[]): HiddenSets {
+function matcher(rules: FilterRule[], logic: FilterLogic): ((tags: Tags | undefined) => boolean) | null {
   const active = rules.filter(isComplete)
-  if (active.length === 0) return NOTHING_HIDDEN
-  const matches = (tags: Tags | undefined) => active.some((rule) => matchesRule(tags, rule))
+  if (active.length === 0) return null
+  return logic === 'all'
+    ? (tags) => active.every((rule) => matchesRule(tags, rule))
+    : (tags) => active.some((rule) => matchesRule(tags, rule))
+}
+
+export function computeHidden(
+  doc: OsmDoc,
+  rules: FilterRule[],
+  mode: FilterMode = 'hide',
+  logic: FilterLogic = 'any',
+): HiddenSets {
+  const matches = matcher(rules, logic)
+  if (!matches) return NOTHING_HIDDEN
   const ways = new Set<number>()
   const nodes = new Set<number>()
-  for (const way of doc.ways.values()) if (matches(way.tags)) ways.add(way.id)
+  for (const way of doc.ways.values()) if (matches(way.tags) === (mode === 'hide')) ways.add(way.id)
+  // В режиме «только найденное» узлы не прячем: светофор на оставленной дороге должен быть виден.
   // Узлы без атрибутов — это просто точки формы дорог, правилам про атрибуты они не подчиняются
-  for (const node of doc.nodes.values()) if (node.tags && matches(node.tags)) nodes.add(node.id)
+  if (mode === 'hide') {
+    for (const node of doc.nodes.values()) if (node.tags && matches(node.tags)) nodes.add(node.id)
+  }
   return { ways, nodes }
+}
+
+/** Дороги, подходящие под условия: их можно выделить разом. */
+export function matchingWays(doc: OsmDoc, rules: FilterRule[], logic: FilterLogic): number[] {
+  const matches = matcher(rules, logic)
+  if (!matches) return []
+  return [...doc.ways.values()].filter((way) => matches(way.tags)).map((way) => way.id)
 }
 
 /** Площадку перекрёстка прячем, только когда скрыты все дороги, которые в ней сходятся. */
@@ -127,29 +215,7 @@ export function collectKeyStats(doc: OsmDoc): KeyStat[] {
     .sort((a, b) => b.ways + b.nodes - a.ways - a.nodes)
 }
 
-export interface QuickFilter {
-  id: string
-  label: string
-  key: string
-  op: FilterOp
-  value: string
-}
-
-/** Типовые слои карты: то, что чаще всего хочется убрать одним нажатием. */
-export const QUICK_FILTERS: QuickFilter[] = [
-  { id: 'building', label: 'Здания', key: 'building', op: 'exists', value: '' },
-  { id: 'footway', label: 'Тротуары', key: 'highway', op: 'eq', value: 'footway' },
-  { id: 'steps', label: 'Лестницы', key: 'highway', op: 'eq', value: 'steps' },
-  { id: 'path', label: 'Тропы', key: 'highway', op: 'eq', value: 'path' },
-  { id: 'service', label: 'Проезды', key: 'highway', op: 'eq', value: 'service' },
-  { id: 'residential', label: 'Жилые улицы', key: 'highway', op: 'eq', value: 'residential' },
-  { id: 'landuse', label: 'Территории', key: 'landuse', op: 'exists', value: '' },
-  { id: 'railway', label: 'Железная дорога', key: 'railway', op: 'exists', value: '' },
-  { id: 'barrier', label: 'Ограждения', key: 'barrier', op: 'exists', value: '' },
-  { id: 'amenity', label: 'Объекты инфраструктуры', key: 'amenity', op: 'exists', value: '' },
-]
-
-export function countMatches(doc: OsmDoc, filter: Pick<QuickFilter, 'key' | 'op' | 'value'>): number {
+export function countMatches(doc: OsmDoc, filter: Pick<FilterRule, 'key' | 'op' | 'value'>): number {
   const rule: FilterRule = { id: 0, enabled: true, ...filter }
   let count = 0
   for (const way of doc.ways.values()) if (matchesRule(way.tags, rule)) count++

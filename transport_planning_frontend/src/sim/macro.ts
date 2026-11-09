@@ -52,6 +52,9 @@ export interface Zone {
   attraction: number
   position: XY
   label: string
+  /** Граница и центр района: только у районов из застройки, у въездов на границе их нет. */
+  outline?: XY[]
+  center?: XY
 }
 
 export interface OdRoute {
@@ -392,14 +395,18 @@ function buildGateways(net: SimNet, doc: OsmDoc, loads: Map<SimEdge, EdgeLoad>, 
 
 function buildInternalZones(net: SimNet, doc: OsmDoc, period: Period, startId: number, core: Set<SimEdge>): Zone[] {
   const projector = net.projector
-  const cells = new Map<string, { res: number; jobs: number; x: number; y: number; w: number }>()
+  const cells = new Map<string, { res: number; jobs: number; x: number; y: number; w: number; points: XY[] }>()
   for (const way of doc.ways.values()) {
     const tags = way.tags
     if (!tags?.building || tags.building === 'no' || way.nds.length < 4) continue
     const { area, center } = buildingFloorArea(doc, way.nds, projector, tags['building:levels'])
     if (area <= 0) continue
     const key = `${Math.floor(center.x / GRID_M)}:${Math.floor(center.y / GRID_M)}`
-    const cell = cells.get(key) ?? { res: 0, jobs: 0, x: 0, y: 0, w: 0 }
+    const cell = cells.get(key) ?? { res: 0, jobs: 0, x: 0, y: 0, w: 0, points: [] }
+    for (const nd of way.nds) {
+      const node = doc.nodes.get(nd)
+      if (node) cell.points.push(projector.toXY(node))
+    }
     if (RESIDENTIAL_TYPES.has(tags.building)) cell.res += area
     else if (JOB_TYPES.has(tags.building) || tags.amenity || tags.shop || tags.office) cell.jobs += area
     else {
@@ -456,9 +463,27 @@ function buildInternalZones(net: SimNet, doc: OsmDoc, period: Period, startId: n
       attraction,
       position: projector.toXY(doc.node(best)),
       label: `Район ${zones.length + 1}`,
+      outline: convexHull(cell.points),
+      center,
     })
   }
   return zones
+}
+
+/** Выпуклая оболочка застройки района: алгоритм монотонной цепочки. */
+export function convexHull(points: XY[]): XY[] {
+  const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y)
+  const turn = (o: XY, a: XY, b: XY) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+  const half = (list: XY[]) => {
+    const chain: XY[] = []
+    for (const point of list) {
+      while (chain.length >= 2 && turn(chain[chain.length - 2]!, chain[chain.length - 1]!, point) <= 0) chain.pop()
+      chain.push(point)
+    }
+    chain.pop()
+    return chain
+  }
+  return [...half(sorted), ...half([...sorted].reverse())]
 }
 
 /** Двоичная куча на массивах: Дейкстра запускается сотни раз за один расчёт. */

@@ -29,6 +29,9 @@ export const SOURCE_IDS = [
   'simBarLabels',
   'simOd',
   'simZones',
+  'zoneAreas',
+  'zoneLabels',
+  'zoneLinks',
   'simJams',
   'simSignals',
   'other',
@@ -245,15 +248,15 @@ export function buildLayers(lat: number): LayerSpecification[] {
         'motorway', '#ef4444', 'trunk', '#f97316', 'primary', '#f59e0b',
         'secondary', '#eab308', 'tertiary', '#2dd4bf', 'residential', '#60a5fa',
         'unclassified', '#60a5fa', 'living_street', '#a78bfa', 'service', '#71717a', '#a1a1aa'],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['+', 0.6, ['*', 0.35, ['get', 'lanes']]], 19, ['+', 1.5, ['*', 1.5, ['get', 'lanes']]]],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 13, 0.7, 17, 1.3, 20, 2.4]
     } },
     { id: 'graph-direction', type: 'symbol', source: 'graphLinks', filter: ['get', 'oneway'], layout: {
       visibility: 'none',
       'symbol-placement': 'line',
-      'symbol-spacing': 60,
+      'symbol-spacing': 90,
       'icon-image': 'direction',
-      'icon-rotate': ['case', ['get', 'reversed'], 270, 90],
-      'icon-size': 1,
+      'icon-rotate': 90,
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 15, 0.35, 19, 0.7],
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },
@@ -319,6 +322,24 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': false,
     } },
 
+    { id: 'zone-area', type: 'fill', source: 'zoneAreas', layout: { visibility: 'none' }, paint: {
+      'fill-color': ['interpolate', ['linear'], ['get', 'share'], 0, '#22c55e', 0.5, '#eab308', 1, '#ef4444'],
+      'fill-opacity': 0.16,
+    } },
+    { id: 'zone-outline', type: 'line', source: 'zoneAreas', layout: { visibility: 'none', 'line-join': 'round' }, paint: {
+      'line-color': ['interpolate', ['linear'], ['get', 'share'], 0, '#22c55e', 0.5, '#eab308', 1, '#ef4444'],
+      'line-width': 1.6,
+    } },
+    { id: 'zone-link', type: 'line', source: 'zoneLinks', layout: { visibility: 'none' }, paint: {
+      'line-color': '#f59e0b',
+      'line-width': 1.2,
+      'line-dasharray': [2, 2],
+    } },
+    { id: 'zone-label', type: 'symbol', source: 'zoneLabels', minzoom: 14, layout: {
+      visibility: 'none',
+      'icon-image': ['get', 'image'],
+      'icon-allow-overlap': true,
+    } },
     { id: 'sim-od', type: 'line', source: 'simOd', layout: { visibility: 'none', 'line-cap': 'round' }, paint: {
       'line-color': '#7c3aed',
       'line-width': ['get', 'width'],
@@ -411,6 +432,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-color': 'rgba(0,0,0,0)',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
+    } },
+    { id: 'overlay-port', type: 'circle', source: 'overlay', filter: ['in', ['get', 'role'], ['literal', ['port-in', 'port-out', 'port-source']]], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 17.5, ['case', ['==', ['get', 'role'], 'port-source'], 5, 3], 20, ['case', ['==', ['get', 'role'], 'port-source'], 9, 7]],
+      'circle-color': ['match', ['get', 'role'], 'port-source', '#f59e0b', '#14171c'],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': ['match', ['get', 'role'], 'port-in', '#ef4444', 'port-out', '#22d3ee', '#ffffff'],
     } },
     { id: 'overlay-mid', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'mid'], paint: {
       'circle-radius': 3.5,
@@ -566,8 +593,6 @@ export const BASEMAP_OPTIONS: { id: BasemapId; label: string }[] = [
   { id: 'satellite', label: 'Снимок Esri' },
   { id: 'hybrid', label: 'Снимок и дороги' },
   { id: 'scheme2gis', label: 'Схема 2ГИС' },
-  { id: 'cartoDark', label: 'Схема тёмная' },
-  { id: 'cartoLight', label: 'Схема светлая' },
   { id: 'osm', label: 'OSM' },
 ]
 
@@ -612,12 +637,35 @@ export function basemapSource(id: BasemapId, customUrl: string): RasterSourceSpe
 }
 
 /** Слои модели, прозрачность которых меняет ползунок: разметка остаётся, чтобы сверять её со снимком. */
-export const MODEL_FILL_LAYERS: { id: string; opacity: number }[] = [
-  { id: 'surface', opacity: 1 },
-  { id: 'junctions', opacity: 1 },
-  { id: 'surface-bridge', opacity: 1 },
-  { id: 'junctions-bridge', opacity: 1 },
-  { id: 'surface-tunnel', opacity: 0.65 },
-  { id: 'buildings', opacity: 1 },
-  { id: 'landuse', opacity: 0.85 },
+/** Слои модели: ползунок «модель — карта» гасит их все вместе, а не только заливки. */
+export const MODEL_LAYERS = [
+  'landuse',
+  'water-fill',
+  'water-line',
+  'buildings',
+  'other',
+  'rail',
+  'minor',
+  'surface-tunnel',
+  'surface',
+  'junctions',
+  'markings-edge',
+  'markings-divider',
+  'markings-lane',
+  'markings-lane-solid',
+  'turn-ribbon',
+  'turn-line',
+  'crossings',
+  'bridge-casing',
+  'surface-bridge',
+  'junctions-bridge',
+  'markings-bridge',
+  'arrows',
+  'graph-links',
+  'graph-direction',
+  'graph-nodes',
+  'points',
+  'signals',
+  'traffic-signs',
+  'labels',
 ]

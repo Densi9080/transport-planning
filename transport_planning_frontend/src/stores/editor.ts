@@ -3,8 +3,8 @@ import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
-import { computeHidden, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
-import { Projector, smoothCurve } from '@/core/geo'
+import { computeHidden, type FilterLogic, type FilterMode, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
+import { offsetPolyline, Projector, smoothCurve } from '@/core/geo'
 import {
   addNode,
   addWay,
@@ -22,7 +22,10 @@ import {
   unglueNode,
 } from '@/core/ops'
 import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
-import { parseProfile, totalWidth } from '@/core/lanes'
+import type { CrsId } from '@/core/crs'
+import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lanePorts, laneStubNearNode } from '@/core/lanePick'
+import { nodeConnectors, setLaneConnection } from '@/core/laneOps'
+import { laneOffsets, parseProfile, totalWidth } from '@/core/lanes'
 import { buildNetwork } from '@/core/topology'
 import {
   addSpeedBump,
@@ -48,7 +51,7 @@ import {
   type TransitLine,
   type TransitMode,
 } from '@/core/transit'
-import type { LatLon, Tags } from '@/core/types'
+import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 
@@ -64,6 +67,7 @@ export type Tool =
   | 'speed'
   | 'bump'
   | 'sign'
+  | 'connector'
   | 'lineWay'
   | 'lineStop'
 
@@ -112,6 +116,8 @@ const WIDE_SCREEN_PX = 1100
 const TILE_URL_KEY = 'osm-editor-tile-url'
 const THEME_KEY = 'osm-editor-theme'
 const FILTER_KEY = 'osm-editor-filter:'
+const CRS_KEY = 'osm-editor-crs'
+const CONNECTOR_STUB_M = 25
 
 function readStored(key: string): string | null {
   try {
@@ -147,6 +153,11 @@ export const useEditor = defineStore('editor', () => {
   const drawMode = ref<DrawMode>('polyline')
   const drawPoints = shallowRef<DrawPoint[]>([])
   const speedStart = shallowRef<{ wayId: number; position: LatLon } | null>(null)
+  const connectorFrom = shallowRef<{ node: number; neighbor: number; lane: number; points: XY[]; port?: XY } | null>(null)
+  const mapBalance = ref(0.5)
+  const crs = ref<CrsId>((readStored(CRS_KEY) as CrsId | null) ?? 'wgs84')
+  const filterMode = ref<FilterMode>('hide')
+  const filterLogic = ref<FilterLogic>('any')
   const trafficOptions = reactive({
     sectionSpeed: 30,
     bumpKind: 'hump' as BumpKind,
@@ -172,6 +183,8 @@ export const useEditor = defineStore('editor', () => {
     arrows: true,
     crossings: true,
     signals: true,
+    trafficSigns: true,
+    zones: false,
     labels: true,
     issues: true,
     transit: false,
@@ -210,6 +223,16 @@ export const useEditor = defineStore('editor', () => {
   const inspectorOpen = ref(wideScreen)
 
   watch(customTileUrl, (value) => writeStored(TILE_URL_KEY, value))
+  watch(crs, (value) => writeStored(CRS_KEY, value))
+  // Один ползунок вместо двух: посередине видно и модель, и карту, к краям одно плавно уступает другому
+  watch(mapBalance, (value) => {
+    modelOpacity.value = Math.min(1, (1 - value) * 2)
+    basemapOpacity.value = Math.min(1, value * 2)
+    if (value > 0.5 && basemap.value === 'none') basemap.value = 'scheme2gis'
+  })
+  watch([filterMode, filterLogic], ([mode, logic]) => {
+    if (projectId.value) writeStored(`${FILTER_KEY}${projectId.value}:mode`, `${mode}|${logic}`)
+  })
   watch(
     theme,
     (value) => {
@@ -229,7 +252,7 @@ export const useEditor = defineStore('editor', () => {
   /** Скрытые по атрибутам объекты. Считается заново при правке графа и при смене правил. */
   const hidden = computed(() => {
     void rev.value
-    return doc.value && filterRules.value.length > 0 ? markRaw(computeHidden(doc.value, filterRules.value)) : NOTHING_HIDDEN
+    return doc.value && filterRules.value.length > 0 ? markRaw(computeHidden(doc.value, filterRules.value, filterMode.value, filterLogic.value)) : NOTHING_HIDDEN
   })
 
   const lines = computed<TransitLine[]>(() => {
@@ -301,6 +324,9 @@ export const useEditor = defineStore('editor', () => {
       selectedLineId.value = null
       junctionNode.value = null
       filterRules.value = readFilterRules(project.id)
+      const [storedMode, storedLogic] = (readStored(FILTER_KEY + project.id + ':mode') ?? '').split('|')
+      filterMode.value = storedMode === 'only' ? 'only' : 'hide'
+      filterLogic.value = storedLogic === 'all' ? 'all' : 'any'
       rev.value++
       runValidation()
     } catch (error) {
@@ -549,6 +575,7 @@ export const useEditor = defineStore('editor', () => {
   function setTool(next: Tool): void {
     if (tool.value === 'road' && next !== 'road') drawPoints.value = []
     speedStart.value = null
+    connectorFrom.value = null
     tool.value = next
   }
 
@@ -711,6 +738,93 @@ export const useEditor = defineStore('editor', () => {
     const title = kind === 'bridge' ? 'Мост' : 'Тоннель'
     toast(`${title}: ${enabled ? 'отмечен, чтобы часть дороги, сначала разрежьте её' : 'снят'}`, 'success')
   }
+
+  /**
+   * Соединение полос на карте: первый щелчок выбирает полосу, по которой подъезжают к узлу,
+   * второй — полосу, на которую из него выезжают. Повторный щелчок снимает соединение.
+   */
+  function pickConnectorLane(point: XY): void {
+    const net = network.value
+    const d = doc.value
+    const p = projector.value
+    if (!net || !d || !p) return
+    const hit = laneAtPoint(net, point)
+    if (!hit) {
+      toast('Щёлкните по полосе дороги')
+      return
+    }
+    const from = connectorFrom.value
+    const target = from ? departureArm(net, hit, from.node) : null
+    if (from && target) {
+      toggleConnection(target.neighbor, hit.lane)
+      return
+    }
+    const arrival = arrivalArm(net, hit)
+    if (!arrival || (net.arms.get(arrival.node)?.length ?? 0) < 2) {
+      toast(from ? 'Эта полоса не выходит из выбранного узла' : 'Выберите полосу, которая подходит к перекрёстку')
+      return
+    }
+    connectorFrom.value = { node: arrival.node, neighbor: arrival.neighbor, lane: hit.lane, points: lanePolyline(hit) }
+  }
+
+  function toggleConnection(toNeighbor: number, toLane: number): void {
+    const from = connectorFrom.value
+    const d = doc.value
+    const p = projector.value
+    if (!from || !d || !p) return
+    if (toNeighbor === from.neighbor) {
+      toast('Разворот на ту же дорогу здесь не настраивается')
+      return
+    }
+    const exists = nodeConnectors(d, p, from.node).connectors.some(
+      (c) => c.from.neighbor === from.neighbor && c.fromLane === from.lane && c.to.neighbor === toNeighbor && c.toLane === toLane,
+    )
+    const done = mutate(exists ? 'Снятие соединения полос' : 'Соединение полос', (doc_, proj) => {
+      setLaneConnection(doc_, proj, from.node, from.neighbor, from.lane, toNeighbor, toLane, !exists)
+      return true
+    })
+    if (done) toast(exists ? 'Соединение снято' : 'Полосы соединены', 'success')
+  }
+
+  /** Концы полос у перекрёстков: считаются, только пока включён инструмент соединения. */
+  const connectorPorts = computed<LanePort[]>(() => {
+    void rev.value
+    return tool.value === 'connector' && network.value ? markRaw(lanePorts(network.value)) : []
+  })
+
+  function startConnectorAtPort(port: LanePort): void {
+    if (port.incoming) connectorFrom.value = { node: port.node, neighbor: port.neighbor, lane: port.lane, points: port.points, port: port.point }
+  }
+
+  function finishConnectorAtPort(port: LanePort): void {
+    const from = connectorFrom.value
+    if (!from) toast('Сначала выберите красную точку: конец полосы, по которой подъезжают')
+    else if (port.incoming) startConnectorAtPort(port)
+    else if (port.node !== from.node) toast('Соединять можно только полосы одного перекрёстка')
+    else toggleConnection(port.neighbor, port.lane)
+  }
+
+  /** Что подсветить на карте, пока выбрана исходная полоса. */
+  const connectorPreview = computed(() => {
+    void rev.value
+    const from = connectorFrom.value
+    const d = doc.value
+    const p = projector.value
+    if (!from || !d || !p) return null
+    const { arms, connectors } = nodeConnectors(d, p, from.node)
+    const targets: XY[][] = []
+    for (const arm of arms) {
+      if (arm.neighbor === from.neighbor) continue
+      const offsets = laneOffsets(arm.link.profile)
+      const list = arm.atStart ? offsets.forward : offsets.backward
+      for (const offset of list) targets.push(laneStubNearNode(offsetPolyline(arm.link.points, offset), arm.atStart, CONNECTOR_STUB_M))
+    }
+    return {
+      source: from.points,
+      targets,
+      connected: connectors.filter((c) => c.from.neighbor === from.neighbor && c.fromLane === from.lane).map((c) => c.points),
+    }
+  })
 
   /** Первый клик задаёт начало участка, второй на той же дороге — его конец. */
   function pickSpeedPoint(wayId: number, position: LatLon): void {
@@ -931,6 +1045,16 @@ export const useEditor = defineStore('editor', () => {
     toggleWayStructure,
     finishRoad,
     speedStart,
+    connectorFrom,
+    connectorPreview,
+    pickConnectorLane,
+    connectorPorts,
+    startConnectorAtPort,
+    finishConnectorAtPort,
+    mapBalance,
+    crs,
+    filterMode,
+    filterLogic,
     trafficOptions,
     pickSpeedPoint,
     placeBump,

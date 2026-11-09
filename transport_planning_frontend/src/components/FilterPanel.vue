@@ -1,8 +1,19 @@
 <script setup lang="ts">
-import { Plus, X } from 'lucide-vue-next'
-import { computed, ref } from 'vue'
+import { MousePointerClick, Plus, X } from 'lucide-vue-next'
+import { computed, ref, watch } from 'vue'
 
-import { collectKeyStats, countMatches, FILTER_OPS, type FilterOp, QUICK_FILTERS } from '@/core/filter'
+import {
+  collectKeyStats,
+  countMatches,
+  fieldOf,
+  FILTER_FIELDS,
+  type FilterOp,
+  matchingWays,
+  OPS_BY_KIND,
+  opLabel,
+  opNeedsValue,
+  valueLabel,
+} from '@/core/filter'
 import { useEditor } from '@/stores/editor'
 
 const editor = useEditor()
@@ -13,65 +24,44 @@ const keyStats = computed(() => {
   return editor.doc ? collectKeyStats(editor.doc) : []
 })
 
-const quick = computed(() => {
-  void editor.rev
-  const doc = editor.doc
-  if (!doc) return []
-  return QUICK_FILTERS.map((filter) => ({ ...filter, count: countMatches(doc, filter) })).filter((filter) => filter.count > 0)
-})
-
-function ruleId(): number {
-  return Date.now() + nextId++
-}
-
-function findQuickRule(filter: (typeof QUICK_FILTERS)[number]) {
-  return editor.filterRules.find((rule) => rule.key === filter.key && rule.op === filter.op && rule.value === filter.value)
-}
-
-function toggleQuick(filter: (typeof QUICK_FILTERS)[number]): void {
-  const existing = findQuickRule(filter)
-  if (existing) {
-    existing.enabled = !existing.enabled
-    if (!existing.enabled) editor.filterRules = editor.filterRules.filter((rule) => rule !== existing)
-    return
-  }
-  editor.filterRules.push({ id: ruleId(), enabled: true, key: filter.key, op: filter.op, value: filter.value })
-}
-
-const draftKey = ref('')
-const draftOp = ref<FilterOp>('exists')
+const draftField = ref('highway')
+const customKey = ref('')
+const draftOp = ref<FilterOp>('eq')
 const draftValue = ref('')
 
-const needsValue = computed(() => FILTER_OPS.find((op) => op.id === draftOp.value)?.needsValue ?? false)
-const canAdd = computed(() => draftKey.value.trim() !== '' && (!needsValue.value || draftValue.value.trim() !== ''))
-const valuesForDraft = computed(() => keyStats.value.find((stat) => stat.key === draftKey.value.trim())?.values ?? [])
+const field = computed(() => fieldOf(draftField.value))
+const draftKey = computed(() => (draftField.value === '*' ? customKey.value.trim() : draftField.value))
+const ops = computed(() => OPS_BY_KIND[field.value.kind])
+const needsValue = computed(() => opNeedsValue(draftOp.value))
+
+watch(draftField, () => {
+  draftOp.value = ops.value[0]!
+  draftValue.value = ''
+})
+
+const suggestions = computed(() => keyStats.value.find((stat) => stat.key === draftKey.value)?.values ?? [])
+const canAdd = computed(() => draftKey.value !== '' && (!needsValue.value || draftValue.value.trim() !== ''))
 
 const draftCount = computed(() => {
   const doc = editor.doc
   if (!doc || !canAdd.value) return null
-  return countMatches(doc, { key: draftKey.value.trim(), op: draftOp.value, value: draftValue.value.trim() })
+  return countMatches(doc, { key: draftKey.value, op: draftOp.value, value: draftValue.value.trim() })
 })
 
 function addRule(): void {
   if (!canAdd.value) return
   editor.filterRules.push({
-    id: ruleId(),
+    id: Date.now() + nextId++,
     enabled: true,
-    key: draftKey.value.trim(),
+    key: draftKey.value,
     op: draftOp.value,
     value: needsValue.value ? draftValue.value.trim() : '',
   })
-  draftKey.value = ''
   draftValue.value = ''
-  draftOp.value = 'exists'
 }
 
 function removeRule(id: number): void {
   editor.filterRules = editor.filterRules.filter((rule) => rule.id !== id)
-}
-
-function needsValueFor(op: FilterOp): boolean {
-  return FILTER_OPS.find((item) => item.id === op)?.needsValue ?? false
 }
 
 function ruleCount(rule: { key: string; op: FilterOp; value: string }): number {
@@ -79,24 +69,37 @@ function ruleCount(rule: { key: string; op: FilterOp; value: string }): number {
   return editor.doc ? countMatches(editor.doc, rule) : 0
 }
 
+function describe(rule: { key: string; op: FilterOp; value: string }): string {
+  const name = fieldOf(rule.key).key === '*' ? rule.key : fieldOf(rule.key).label
+  const value = opNeedsValue(rule.op) ? ` ${valueLabel(rule.key, rule.value)}` : ''
+  return `${name} ${opLabel(rule.op, fieldOf(rule.key).kind)}${value}`
+}
+
+const matched = computed(() => {
+  void editor.rev
+  return editor.doc ? matchingWays(editor.doc, editor.filterRules, editor.filterLogic) : []
+})
+
+function selectMatched(): void {
+  editor.select(matched.value.map((id) => ({ kind: 'way' as const, id })))
+  editor.toast(`Выделено дорог: ${matched.value.length}`, 'success')
+}
+
 const hiddenTotal = computed(() => editor.hidden.ways.size + editor.hidden.nodes.size)
 </script>
 
 <template>
   <section class="section">
-    <div class="eyebrow">Быстро скрыть</div>
-    <label v-for="filter in quick" :key="filter.id" class="check quick">
-      <input :checked="findQuickRule(filter)?.enabled ?? false" type="checkbox" @change="toggleQuick(filter)" />
-      <span class="ellipsis">{{ filter.label }}</span>
-      <span class="count faint">{{ filter.count }}</span>
-    </label>
-  </section>
-
-  <section class="section">
-    <div class="eyebrow">Своё условие</div>
+    <div class="eyebrow">Условие</div>
     <div class="field">
-      <label for="filter-key">Атрибут</label>
-      <input id="filter-key" v-model="draftKey" class="input" list="filter-keys" placeholder="например, building" />
+      <label for="filter-field">Атрибут</label>
+      <select id="filter-field" v-model="draftField" class="input">
+        <option v-for="item in FILTER_FIELDS" :key="item.key" :value="item.key">{{ item.label }}</option>
+      </select>
+    </div>
+    <div v-if="draftField === '*'" class="field">
+      <label for="filter-key">Тег OSM</label>
+      <input id="filter-key" v-model="customKey" class="input" list="filter-keys" placeholder="например, surface" />
       <datalist id="filter-keys">
         <option v-for="stat in keyStats" :key="stat.key" :value="stat.key">{{ stat.ways + stat.nodes }} объектов</option>
       </datalist>
@@ -105,49 +108,60 @@ const hiddenTotal = computed(() => editor.hidden.ways.size + editor.hidden.nodes
       <div class="field">
         <label for="filter-op">Условие</label>
         <select id="filter-op" v-model="draftOp" class="input">
-          <option v-for="op in FILTER_OPS" :key="op.id" :value="op.id">{{ op.label }}</option>
+          <option v-for="op in ops" :key="op" :value="op">{{ opLabel(op, field.kind) }}</option>
         </select>
       </div>
       <div v-if="needsValue" class="field">
         <label for="filter-value">Значение</label>
-        <input id="filter-value" v-model="draftValue" class="input" list="filter-values" />
+        <select v-if="field.kind === 'enum'" id="filter-value" v-model="draftValue" class="input">
+          <option value="" disabled>Выберите</option>
+          <option v-for="item in suggestions" :key="item.value" :value="item.value">{{ valueLabel(draftKey, item.value) }} ({{ item.count }})</option>
+        </select>
+        <input v-else id="filter-value" v-model="draftValue" class="input" :inputmode="field.kind === 'number' ? 'decimal' : 'text'" list="filter-values" />
         <datalist id="filter-values">
-          <option v-for="item in valuesForDraft" :key="item.value" :value="item.value">{{ item.count }}</option>
+          <option v-for="item in suggestions" :key="item.value" :value="item.value">{{ item.count }}</option>
         </datalist>
       </div>
     </div>
     <button class="btn block" :disabled="!canAdd" @click="addRule">
       <Plus :size="13" aria-hidden="true" />
-      Скрыть{{ draftCount !== null ? `: ${draftCount} объектов` : '' }}
+      Добавить{{ draftCount !== null ? `: подходит ${draftCount}` : '' }}
     </button>
   </section>
 
   <section v-if="editor.filterRules.length" class="section">
     <div class="row">
-      <span class="eyebrow">Правила</span>
+      <span class="eyebrow">Фильтр</span>
       <span class="spacer" />
-      <button class="btn small" @click="editor.filterRules = []">Показать всё</button>
+      <button class="btn small" @click="editor.filterRules = []">Сбросить</button>
+    </div>
+    <div class="segmented" role="group" aria-label="Действие фильтра">
+      <button :class="{ active: editor.filterMode === 'hide' }" :aria-pressed="editor.filterMode === 'hide'" @click="editor.filterMode = 'hide'">Скрыть найденное</button>
+      <button :class="{ active: editor.filterMode === 'only' }" :aria-pressed="editor.filterMode === 'only'" @click="editor.filterMode = 'only'">Оставить только их</button>
+    </div>
+    <div v-if="editor.filterRules.length > 1" class="segmented" role="group" aria-label="Сочетание условий">
+      <button :class="{ active: editor.filterLogic === 'any' }" :aria-pressed="editor.filterLogic === 'any'" @click="editor.filterLogic = 'any'">Любое условие</button>
+      <button :class="{ active: editor.filterLogic === 'all' }" :aria-pressed="editor.filterLogic === 'all'" @click="editor.filterLogic = 'all'">Все условия</button>
     </div>
     <div v-for="rule in editor.filterRules" :key="rule.id" class="rule">
-      <input v-model="rule.enabled" type="checkbox" :aria-label="`Включить правило ${rule.key}`" />
-      <input v-model="rule.key" class="input" :aria-label="`Атрибут правила`" />
-      <select v-model="rule.op" class="input op" aria-label="Условие">
-        <option v-for="op in FILTER_OPS" :key="op.id" :value="op.id">{{ op.label }}</option>
-      </select>
-      <input v-if="needsValueFor(rule.op)" v-model="rule.value" class="input" aria-label="Значение" />
+      <input v-model="rule.enabled" type="checkbox" :aria-label="`Включить условие: ${describe(rule)}`" />
+      <span class="ellipsis text" :title="describe(rule)">{{ describe(rule) }}</span>
       <span class="count faint" :title="`Подходит объектов: ${ruleCount(rule)}`">{{ ruleCount(rule) }}</span>
-      <button class="btn ghost small remove" :aria-label="`Удалить правило ${rule.key}`" @click="removeRule(rule.id)"><X :size="12" /></button>
+      <button class="btn ghost small remove" :aria-label="`Удалить условие: ${describe(rule)}`" @click="removeRule(rule.id)"><X :size="12" /></button>
     </div>
+    <button class="btn block small" :disabled="matched.length === 0" @click="selectMatched">
+      <MousePointerClick :size="13" aria-hidden="true" /> Выделить найденные дороги: {{ matched.length }}
+    </button>
     <p class="muted info">
-      Скрыто объектов: {{ hiddenTotal }}. Скрытие меняет только вид карты: объекты остаются в графе, в расчётах и в экспорте.
+      Скрыто объектов: {{ hiddenTotal }}. Фильтр меняет только вид карты: объекты остаются в графе, в расчётах и в экспорте.
     </p>
+  </section>
+  <section v-else class="section">
+    <p class="muted info">Задайте условие, например «Число полос ≥ 4», чтобы увидеть только магистрали или выделить их разом.</p>
   </section>
 </template>
 
 <style scoped>
-.quick {
-  padding: 1px 0;
-}
 .count {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
@@ -155,14 +169,11 @@ const hiddenTotal = computed(() => editor.hidden.ways.size + editor.hidden.nodes
 .rule {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
 }
-.rule .input {
+.text {
   flex: 1;
   min-width: 0;
-}
-.rule .op {
-  flex: 0 0 62px;
 }
 .remove {
   padding: 1px 2px;

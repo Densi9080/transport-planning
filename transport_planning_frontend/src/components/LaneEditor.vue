@@ -1,19 +1,26 @@
 <script setup lang="ts">
-import { ArrowLeft, ArrowRight, ArrowUp, Undo2 } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, ArrowUp, Minus, Plus, RotateCcw, Undo2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import {
   dividerMode,
   type DividerMode,
+  MAX_LANE_WIDTH,
+  MIN_LANE_WIDTH,
   parseProfile,
   toggleTurn,
+  totalWidth,
   type TravelDirection,
   type Turn,
   turnAllows,
   withDivider,
+  withLaneWidth,
+  withoutLaneWidths,
   withTurns,
 } from '@/core/lanes'
 import type { Tags } from '@/core/types'
+
+import CrossSection from './CrossSection.vue'
 
 const props = defineProps<{ tags: Tags }>()
 const emit = defineEmits<{ change: [tags: Tags] }>()
@@ -46,6 +53,18 @@ function cycleDivider(direction: TravelDirection, boundary: number): void {
   emit('change', withDivider(props.tags, direction, boundary, next))
 }
 
+const WIDTH_STEP = 0.25
+const hasCustomWidths = computed(() => ['width:lanes', 'width:lanes:forward', 'width:lanes:backward'].some((key) => props.tags[key] !== undefined))
+
+function widthOf(direction: TravelDirection, lane: number): number {
+  return (direction === 'forward' ? profile.value.widthsForward : profile.value.widthsBackward)[lane] ?? profile.value.laneWidth
+}
+
+function setWidth(direction: TravelDirection, lane: number, width: number): void {
+  if (!Number.isFinite(width)) return
+  emit('change', withLaneWidth(props.tags, direction, lane, width))
+}
+
 const directions = computed(() => {
   const result: { id: TravelDirection; title: string; lanes: string[] }[] = []
   const fill = (count: number, turns: string[] | null) =>
@@ -76,6 +95,17 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
 
 <template>
   <div class="lanes">
+    <div class="gabarit">
+      <div class="row">
+        <span class="eyebrow">Поперечное сечение</span>
+        <span class="spacer" />
+        <strong>{{ totalWidth(profile).toFixed(2) }} м</strong>
+      </div>
+      <CrossSection :forward="profile.widthsForward" :backward="profile.widthsBackward" dimensions />
+      <button v-if="hasCustomWidths" class="btn small block" @click="emit('change', withoutLaneWidths(tags))">
+        <RotateCcw :size="12" aria-hidden="true" /> Сбросить ширину полос
+      </button>
+    </div>
     <div v-for="direction in directions" :key="direction.id" class="direction">
       <div class="eyebrow">{{ direction.title }}</div>
       <div class="strip" role="group" :aria-label="direction.title">
@@ -104,6 +134,17 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
           >
             <component :is="button.icon" :size="14" />
           </button>
+          <div class="width" role="group" :aria-label="`Ширина полосы ${index + 1}`">
+            <button aria-label="Уже" :disabled="widthOf(direction.id, index) <= MIN_LANE_WIDTH" @click="setWidth(direction.id, index, widthOf(direction.id, index) - WIDTH_STEP)"><Minus :size="10" /></button>
+            <input
+              :value="widthOf(direction.id, index).toFixed(2)"
+              inputmode="decimal"
+              :aria-label="`Ширина полосы ${index + 1}, метров`"
+              :title="`От ${MIN_LANE_WIDTH} до ${MAX_LANE_WIDTH} м`"
+              @change="setWidth(direction.id, index, Number.parseFloat(($event.target as HTMLInputElement).value.replace(',', '.')))"
+            />
+            <button aria-label="Шире" :disabled="widthOf(direction.id, index) >= MAX_LANE_WIDTH" @click="setWidth(direction.id, index, widthOf(direction.id, index) + WIDTH_STEP)"><Plus :size="10" /></button>
+          </div>
         </div>
         </template>
       </div>
@@ -169,7 +210,7 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
   background: #fff;
 }
 .lane {
-  flex: 1 0 44px;
+  flex: 1 0 62px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -203,5 +244,39 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
 .note {
   margin: 0;
   font-size: 12px;
+}
+.gabarit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.width {
+  display: flex;
+  align-items: center;
+  margin-top: 3px;
+}
+.width button {
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: #fff;
+}
+.width button:disabled {
+  opacity: 0.35;
+}
+.width input {
+  width: 32px;
+  height: 18px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+  color: #fff;
+  font-size: 10px;
+  text-align: center;
 }
 </style>

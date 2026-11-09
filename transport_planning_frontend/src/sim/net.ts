@@ -337,9 +337,11 @@ function buildEdges(doc: OsmDoc, network: Network, net: SimNet): Map<Arm, { in?:
         edge.lanes.push(new SimLane(edge, index, points, heights))
       })
       // Контур всего направления: по нему подсвечивается загрузка
-      const halfLane = link.profile.laneWidth / 2
-      const outer = offsetPolyline(trimmed, list[list.length - 1]! + (forward ? -halfLane : halfLane), startTangent, endTangent)
-      const inner = offsetPolyline(trimmed, list[0]! + (forward ? halfLane : -halfLane), startTangent, endTangent)
+      const widths = forward ? link.profile.widthsForward : link.profile.widthsBackward
+      const halfOuter = widths[widths.length - 1]! / 2
+      const halfInner = widths[0]! / 2
+      const outer = offsetPolyline(trimmed, list[list.length - 1]! + (forward ? -halfOuter : halfOuter), startTangent, endTangent)
+      const inner = offsetPolyline(trimmed, list[0]! + (forward ? halfInner : -halfInner), startTangent, endTangent)
       edge.outline = [...outer, ...inner.reverse()]
       net.edges.push(edge)
       const inArm = forward ? end : start

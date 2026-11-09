@@ -2,6 +2,7 @@
 import { Footprints, Route, Scissors, TrafficCone, Trash2, Unlink } from 'lucide-vue-next'
 import { computed } from 'vue'
 
+import { formatPosition } from '@/core/crs'
 import { bearing } from '@/core/geo'
 import { moveNode, setMovementAllowed } from '@/core/ops'
 import { type Arm, junctionMovements, type Movement } from '@/core/topology'
@@ -88,6 +89,7 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
         <input id="node-lon" class="input" :value="node.lon.toFixed(7)" @change="setCoordinate('lon', $event)" />
       </div>
     </div>
+    <p v-if="editor.crs !== 'wgs84'" class="muted info">{{ formatPosition(node, editor.crs, editor.projector) }}</p>
   </div>
 
   <div class="section">

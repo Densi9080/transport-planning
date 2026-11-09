@@ -9,6 +9,9 @@ export interface LaneProfile {
   backward: number
   oneway: boolean
   laneWidth: number
+  /** Ширина каждой полосы слева направо по ходу её движения. */
+  widthsForward: number[]
+  widthsBackward: number[]
   /** Манёвры полос слева направо по ходу движения; null, если не заданы. */
   turnsForward: string[] | null
   turnsBackward: string[] | null
@@ -123,10 +126,16 @@ export function parseProfile(tags: Tags): LaneProfile {
   if (forward + backward === 0) forward = 1
 
   const widthTag = Number.parseFloat(tags.width ?? '')
-  const laneWidth =
+  const uniformWidth =
     Number.isFinite(widthTag) && widthTag > 0
       ? clamp(widthTag / (forward + backward), 2.25, 5)
       : (DEFAULT_LANE_WIDTH[highway.replace('_link', '')] ?? 3)
+  const widthsOf = (key: string, count: number): number[] =>
+    parseLaneWidths(tags[key], count) ?? Array.from({ length: count }, () => uniformWidth)
+  const widthsForward = widthsOf(oneway && !reversed ? 'width:lanes' : 'width:lanes:forward', forward)
+  const widthsBackward = widthsOf(oneway && reversed ? 'width:lanes' : 'width:lanes:backward', backward)
+  const allWidths = [...widthsForward, ...widthsBackward]
+  const laneWidth = allWidths.reduce((sum, value) => sum + value, 0) / allWidths.length
 
   const allDirections = parseTurnLanes(tags['turn:lanes'])
   let turnsForward = parseTurnLanes(tags['turn:lanes:forward'])
@@ -149,7 +158,69 @@ export function parseProfile(tags: Tags): LaneProfile {
     }
   }
 
-  return { forward, backward, oneway, laneWidth, turnsForward, turnsBackward, changeForward, changeBackward, inferred }
+  return {
+    forward,
+    backward,
+    oneway,
+    laneWidth,
+    widthsForward,
+    widthsBackward,
+    turnsForward,
+    turnsBackward,
+    changeForward,
+    changeBackward,
+    inferred,
+  }
+}
+
+export const MIN_LANE_WIDTH = 2
+export const MAX_LANE_WIDTH = 6
+
+function parseLaneWidths(value: string | undefined, count: number): number[] | null {
+  if (value === undefined || count === 0) return null
+  const parts = value.split('|').map((part) => Number.parseFloat(part))
+  if (parts.length !== count || parts.some((part) => !Number.isFinite(part) || part <= 0)) return null
+  return parts.map((part) => clamp(part, MIN_LANE_WIDTH, MAX_LANE_WIDTH))
+}
+
+function formatMeters(value: number): string {
+  return String(Math.round(value * 100) / 100)
+}
+
+function widthKey(tags: Tags, direction: TravelDirection): string {
+  return isOneway(tags) ? 'width:lanes' : `width:lanes:${direction}`
+}
+
+/** Общая ширина нужна симуляторам, которые не читают ширину отдельных полос, например Webots. */
+function writeTotalWidth(tags: Tags): void {
+  tags.width = formatMeters(totalWidth(parseProfile(tags)))
+}
+
+/** Задаёт ширину одной полосы и держит общую ширину дороги согласованной с ней. */
+export function withLaneWidth(tags: Tags, direction: TravelDirection, lane: number, width: number): Tags {
+  const profile = parseProfile(tags)
+  const widths = [...(direction === 'forward' ? profile.widthsForward : profile.widthsBackward)]
+  if (lane < 0 || lane >= widths.length) return tags
+  widths[lane] = clamp(Math.round(width * 20) / 20, MIN_LANE_WIDTH, MAX_LANE_WIDTH)
+  const next: Tags = { ...tags, [widthKey(tags, direction)]: widths.map(formatMeters).join('|') }
+  // Вторая сторона фиксируется явно: иначе её ширина начала бы считаться от новой общей
+  if (!isOneway(tags)) {
+    const other: TravelDirection = direction === 'forward' ? 'backward' : 'forward'
+    const otherWidths = other === 'forward' ? profile.widthsForward : profile.widthsBackward
+    if (otherWidths.length > 0) next[widthKey(tags, other)] = otherWidths.map(formatMeters).join('|')
+  }
+  writeTotalWidth(next)
+  return next
+}
+
+/** Убирает индивидуальные ширины: полосы снова считаются одинаковыми. */
+export function withoutLaneWidths(tags: Tags): Tags {
+  const next: Tags = { ...tags }
+  delete next['width:lanes']
+  delete next['width:lanes:forward']
+  delete next['width:lanes:backward']
+  delete next.width
+  return next
 }
 
 /** Как можно пересекать линию между соседними полосами: от левой к правой и обратно. */
@@ -209,7 +280,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export function totalWidth(profile: LaneProfile): number {
-  return (profile.forward + profile.backward) * profile.laneWidth
+  return [...profile.widthsForward, ...profile.widthsBackward].reduce((sum, value) => sum + value, 0)
 }
 
 export interface LaneOffsets {
@@ -219,6 +290,9 @@ export interface LaneOffsets {
   backward: number[]
   /** Линия между встречными потоками. */
   divider: number
+  /** Линии между соседними полосами: i-й элемент разделяет полосы i и i + 1. */
+  forwardBoundaries: number[]
+  backwardBoundaries: number[]
   left: number
   right: number
 }
@@ -226,12 +300,30 @@ export interface LaneOffsets {
 /** Смещения в поперечном сечении: положительные — слева от оси дороги. Правостороннее движение. */
 export function laneOffsets(profile: LaneProfile): LaneOffsets {
   const width = totalWidth(profile)
-  const divider = width / 2 - profile.backward * profile.laneWidth
-  const forward: number[] = []
-  const backward: number[] = []
-  for (let i = 0; i < profile.forward; i++) forward.push(divider - (i + 0.5) * profile.laneWidth)
-  for (let i = 0; i < profile.backward; i++) backward.push(divider + (i + 0.5) * profile.laneWidth)
-  return { forward, backward, divider, left: width / 2, right: -width / 2 }
+  const backwardWidth = profile.widthsBackward.reduce((sum, value) => sum + value, 0)
+  const divider = width / 2 - backwardWidth
+  const walk = (widths: number[], sign: number) => {
+    const centers: number[] = []
+    const boundaries: number[] = []
+    let walked = 0
+    widths.forEach((value, index) => {
+      centers.push(divider + sign * (walked + value / 2))
+      walked += value
+      if (index < widths.length - 1) boundaries.push(divider + sign * walked)
+    })
+    return { centers, boundaries }
+  }
+  const forward = walk(profile.widthsForward, -1)
+  const backward = walk(profile.widthsBackward, 1)
+  return {
+    forward: forward.centers,
+    backward: backward.centers,
+    divider,
+    forwardBoundaries: forward.boundaries,
+    backwardBoundaries: backward.boundaries,
+    left: width / 2,
+    right: -width / 2,
+  }
 }
 
 /** Записывает число полос. Лишние манёвры обрезаются, недостающие дополняются пустыми. */
@@ -246,6 +338,7 @@ export function withLanes(tags: Tags, forward: number, backward: number): Tags {
     fitTurns(next, 'turn:lanes', Math.max(1, lanes))
     fitTurns(next, 'turn:lanes:forward', Math.max(1, lanes))
     fitChanges(next, 'change:lanes', Math.max(1, lanes))
+    fitWidths(next, 'width:lanes', Math.max(1, lanes))
   } else {
     next.lanes = String(forward + backward)
     next['lanes:forward'] = String(forward)
@@ -254,8 +347,24 @@ export function withLanes(tags: Tags, forward: number, backward: number): Tags {
     fitTurns(next, 'turn:lanes:backward', backward)
     fitChanges(next, 'change:lanes:forward', forward)
     fitChanges(next, 'change:lanes:backward', backward)
+    fitWidths(next, 'width:lanes:forward', forward)
+    fitWidths(next, 'width:lanes:backward', backward)
   }
+  if (next['width:lanes'] || next['width:lanes:forward'] || next['width:lanes:backward']) writeTotalWidth(next)
   return next
+}
+
+/** Новая полоса получает ширину соседней: так дорога не меняет характер при добавлении полосы. */
+function fitWidths(tags: Tags, key: string, count: number): void {
+  const widths = tags[key]?.split('|')
+  if (!widths) return
+  if (count <= 0) {
+    delete tags[key]
+    return
+  }
+  const fitted = widths.slice(0, count)
+  while (fitted.length < count) fitted.push(fitted.at(-1)!)
+  tags[key] = fitted.join('|')
 }
 
 function fitChanges(tags: Tags, key: string, count: number): void {

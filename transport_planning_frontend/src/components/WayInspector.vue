@@ -5,11 +5,12 @@ import { computed, ref } from 'vue'
 import { applyElevationRamp, clearElevation, maxSlopePercent, wayHeights } from '@/core/elevation'
 import { polylineLength } from '@/core/geo'
 import { isOneway, parseProfile, totalWidth, withLanes } from '@/core/lanes'
-import { ROAD_TYPES, TYPE_DEFAULTS } from '@/core/presets'
+import { matchingPreset, ROAD_TYPES, type RoadPreset, TYPE_DEFAULTS, withPreset } from '@/core/presets'
 import type { OWay, Tags } from '@/core/types'
 import { useEditor } from '@/stores/editor'
 
 import LaneEditor from './LaneEditor.vue'
+import ProfileCards from './ProfileCards.vue'
 import TagTable from './TagTable.vue'
 
 const props = defineProps<{ way: OWay }>()
@@ -45,6 +46,12 @@ const heights = computed(() => {
   }
 })
 const parallelGap = ref(12)
+const showProfiles = ref(false)
+const activePreset = computed(() => matchingPreset(tags.value)?.id)
+
+function applyPreset(preset: RoadPreset): void {
+  update(withPreset(tags.value, preset), `Типовой профиль: ${preset.title}`)
+}
 const rampStart = ref(0)
 const rampEnd = ref(5.5)
 const slope = computed(() => {
@@ -207,6 +214,10 @@ function changeLayer(delta: number): void {
       <button class="btn block small" :disabled="!TYPE_DEFAULTS[tags.highway ?? ''] || (!!tags.lanes && !!tags.maxspeed)" @click="fillDefaults">
         <Sparkles :size="13" aria-hidden="true" /> Заполнить пустое по типу дороги
       </button>
+      <button v-if="isRoad" class="btn block small" :aria-expanded="showProfiles" @click="showProfiles = !showProfiles">
+        {{ showProfiles ? 'Скрыть типовые профили' : 'Выбрать типовой профиль' }}
+      </button>
+      <ProfileCards v-if="showProfiles && isRoad" :active-id="activePreset" @pick="applyPreset" />
     </div>
 
     <div class="section">

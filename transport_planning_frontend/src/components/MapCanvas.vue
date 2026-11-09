@@ -17,6 +17,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { bearing, dist, nearestOnSegment, offsetPolyline, polylineLength, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
+import type { LanePort } from '@/core/lanePick'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
@@ -30,7 +31,7 @@ import {
   emptySources,
   ENGINEERING_LAYERS,
   GRAPH_LAYERS,
-  MODEL_FILL_LAYERS,
+  MODEL_LAYERS,
   SIM_LAYERS,
   themePaint,
   TURN_LAYERS,
@@ -479,6 +480,24 @@ function renderOverlay(): void {
   if (editor.tool === 'road') renderDrawPreview(features)
   else hud.value = []
   if (editor.speedStart) features.push(pointOf(editor.speedStart.position, { role: 'draw-point' }))
+  const connector = editor.connectorPreview
+  if (connector) {
+    for (const stub of connector.targets) features.push(lineOf(stub, { role: 'hover', px: 7 }))
+    for (const path of connector.connected) features.push(lineOf(path, { role: 'draw' }))
+    features.push(lineOf(connector.source, { role: 'selected' }))
+  }
+  if (editor.tool === 'connector' && map.getZoom() >= PORT_MIN_ZOOM) {
+    const bounds = map.getBounds()
+    for (const port of editor.connectorPorts) {
+      const position = projector.toLatLon(port.point)
+      if (!bounds.contains([position.lon, position.lat])) continue
+      const source = editor.connectorFrom
+      const isSource = !!source && port.incoming && source.node === port.node && source.neighbor === port.neighbor && source.lane === port.lane
+      features.push(pointOf(position, { role: isSource ? 'port-source' : port.incoming ? 'port-in' : 'port-out' }))
+    }
+    const anchor = editor.connectorFrom?.port
+    if (portDragging && anchor && portCursor) features.push(lineOf([anchor, portCursor], { role: 'draw' }))
+  }
 
   setData('overlay', { type: 'FeatureCollection', features })
 }
@@ -561,6 +580,14 @@ function onMouseMove(event: MapMouseEvent): void {
 
   editor.cursor = { lat: event.lngLat.lat, lon: event.lngLat.lng }
 
+  if (portDragging) {
+    portMoved = true
+    portCursor = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
+    map!.getCanvas().style.cursor = 'grabbing'
+    scheduleOverlay()
+    return
+  }
+
   if (editor.tool === 'road') {
     cursorSnap = original.altKey ? null : findSnap(event.lngLat, null, true)
     cursorPosition = cursorSnap?.position ?? constrained(event.lngLat, original.shiftKey)
@@ -588,8 +615,42 @@ function scheduleOverlay(): void {
   })
 }
 
+const PORT_MIN_ZOOM = 17.5
+const PORT_PICK_PX = 12
+let portDragging = false
+let portMoved = false
+let portCursor: XY | null = null
+
+function portAt(lngLat: LngLat): LanePort | null {
+  if (!map || map.getZoom() < PORT_MIN_ZOOM) return null
+  const p = editor.projector!.toXY({ lat: lngLat.lat, lon: lngLat.lng })
+  let best: LanePort | null = null
+  let bestDistance = PORT_PICK_PX * metersPerPixel(lngLat)
+  for (const port of editor.connectorPorts) {
+    const d = dist(port.point, p)
+    if (d < bestDistance) {
+      bestDistance = d
+      best = port
+    }
+  }
+  return best
+}
+
 function onMouseDown(event: MapMouseEvent): void {
   if (editor.viewMode === 'sim') return
+  if (editor.tool === 'connector' && event.originalEvent.button === 0) {
+    const port = portAt(event.lngLat)
+    if (port?.incoming) {
+      editor.startConnectorAtPort(port)
+      portDragging = true
+      portMoved = false
+      portCursor = null
+      map!.dragPan.disable()
+      event.preventDefault()
+      scheduleOverlay()
+    }
+    return
+  }
   if (event.originalEvent.button !== 0 || editor.tool !== 'select' || event.originalEvent.shiftKey) return
   const hit = pick(event.lngLat)
   if (!hit || hit.kind === 'way') return
@@ -613,7 +674,18 @@ function onMouseDown(event: MapMouseEvent): void {
   event.preventDefault()
 }
 
-function onMouseUp(): void {
+function onMouseUp(event: MapMouseEvent): void {
+  if (portDragging) {
+    portDragging = false
+    portCursor = null
+    map!.dragPan.enable()
+    suppressClick = true
+    setTimeout(() => (suppressClick = false), 0)
+    const target = portMoved ? portAt(event.lngLat) : null
+    if (target && !target.incoming) editor.finishConnectorAtPort(target)
+    scheduleOverlay()
+    return
+  }
   if (!drag) return
   const finished = drag
   drag = null
@@ -707,6 +779,13 @@ function onClick(event: MapMouseEvent): void {
       }
       scheduleOverlay()
       break
+    case 'connector': {
+      const port = portAt(event.lngLat)
+      if (port) editor.finishConnectorAtPort(port)
+      else editor.pickConnectorLane(editor.projector!.toXY(position))
+      scheduleOverlay()
+      break
+    }
     case 'bump':
     case 'sign': {
       const place = editor.tool === 'bump' ? editor.placeBump : editor.placeSign
@@ -780,7 +859,9 @@ function applyView(): void {
   visible(['sim-jams', 'sim-signals'], micro)
   visible(['arrows'], lane && editor.layers.arrows)
   visible(['crossings'], lane && editor.layers.crossings)
-  visible(['signals', 'traffic-signs'], editor.layers.signals)
+  visible(['signals'], editor.layers.signals)
+  visible(['traffic-signs'], editor.layers.trafficSigns)
+  visible(['zone-area', 'zone-outline', 'zone-link', 'zone-label'], editor.layers.zones)
   visible(['labels'], lane && editor.layers.labels)
   visible(['minor'], editor.layers.minor)
   visible(['rail'], editor.layers.rail)
@@ -824,11 +905,68 @@ function applyBasemap(): void {
   applyModelOpacity()
 }
 
+const OPACITY_PROPERTY: Record<string, string> = {
+  fill: 'fill-opacity',
+  line: 'line-opacity',
+  symbol: 'icon-opacity',
+  circle: 'circle-opacity',
+}
+const baseOpacity = new Map<string, unknown>()
+
+/** Умножает прозрачность слоя с учётом того, что она бывает задана выражением по масштабу. */
+function scaleOpacity(base: unknown, factor: number): unknown {
+  if (base === undefined || base === null) return factor
+  if (typeof base === 'number') return base * factor
+  if (Array.isArray(base) && base[0] === 'interpolate') {
+    return base.map((value, index) => (index >= 3 && (index - 3) % 2 === 1 && typeof value === 'number' ? value * factor : value))
+  }
+  return ['*', factor, base]
+}
+
 function applyModelOpacity(): void {
   if (!ready || !map) return
-  for (const layer of MODEL_FILL_LAYERS) {
-    map.setPaintProperty(layer.id, 'fill-opacity', layer.opacity * editor.modelOpacity)
+  for (const id of MODEL_LAYERS) {
+    const layer = map.getLayer(id)
+    if (!layer) continue
+    const property = OPACITY_PROPERTY[layer.type]
+    if (!property) continue
+    if (!baseOpacity.has(id)) baseOpacity.set(id, map.getPaintProperty(id, property as never))
+    map.setPaintProperty(id, property as never, scaleOpacity(baseOpacity.get(id), editor.modelOpacity) as never)
+    if (layer.type === 'circle') map.setPaintProperty(id, 'circle-stroke-opacity', editor.modelOpacity)
   }
+}
+
+/** Транспортные районы: граница застройки, подпись и связь с точкой подключения к улице. */
+function renderZones(): void {
+  if (!ready || !map || !editor.projector) return
+  const m = map
+  const projector = editor.projector
+  const zones = (sim.macro?.zones ?? []).filter((zone) => zone.outline && zone.outline.length >= 3 && zone.center)
+  const biggest = Math.max(1, ...zones.map((zone) => zone.production + zone.attraction))
+  const share = (zone: (typeof zones)[number]) => (zone.production + zone.attraction) / biggest
+  setData('zoneAreas', {
+    type: 'FeatureCollection',
+    features: zones.map((zone) => {
+      const ring = zone.outline!.map((point) => projector.toLngLat(point))
+      return { type: 'Feature', properties: { share: share(zone) }, geometry: { type: 'Polygon', coordinates: [[...ring, ring[0]!]] } }
+    }),
+  })
+  setData('zoneLabels', {
+    type: 'FeatureCollection',
+    features: zones.map((zone) => ({
+      type: 'Feature',
+      properties: { image: ensureLabelImage(m, zone.label.replace('Район ', 'ТР-'), editor.theme) },
+      geometry: { type: 'Point', coordinates: projector.toLngLat(zone.center!) },
+    })),
+  })
+  setData('zoneLinks', {
+    type: 'FeatureCollection',
+    features: zones.map((zone) => ({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: [projector.toLngLat(zone.center!), projector.toLngLat(zone.position)] },
+    })),
+  })
 }
 
 let cornerMarkers: Marker[] = []
@@ -1123,6 +1261,9 @@ onMounted(() => {
   instance.on('mousemove', onMouseMove)
   instance.on('mousedown', onMouseDown)
   instance.on('mouseup', onMouseUp)
+  instance.on('moveend', () => {
+    if (editor.tool === 'connector') scheduleOverlay()
+  })
   instance.on('click', onClick)
   instance.on('dblclick', onDoubleClick)
   instance.on('zoom', () => (editor.zoom = instance.getZoom()))
@@ -1192,6 +1333,8 @@ watch(() => editor.viewMode, () => {
 })
 watch(() => sim.net, applySimNet)
 watch(() => sim.macro, applyLoadColors)
+watch(() => [sim.macro, editor.layers.zones, editor.theme], renderZones)
+watch(() => editor.tool, () => scheduleOverlay())
 watch(() => sim.loadRev, () => {
   applyLoadColors()
   applyJams()

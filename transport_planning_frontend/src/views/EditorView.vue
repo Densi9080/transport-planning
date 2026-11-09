@@ -11,6 +11,7 @@ import JunctionEditor from '@/components/JunctionEditor.vue'
 import LeftDock from '@/components/LeftDock.vue'
 import LegendBox from '@/components/LegendBox.vue'
 import ListDock from '@/components/ListDock.vue'
+import MapBalance from '@/components/MapBalance.vue'
 import MapCanvas from '@/components/MapCanvas.vue'
 import MenuBar from '@/components/MenuBar.vue'
 import StatusBar from '@/components/StatusBar.vue'
@@ -37,6 +38,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   s: 'speed',
   l: 'bump',
   p: 'sign',
+  q: 'connector',
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -100,6 +102,7 @@ function onKeyDown(event: KeyboardEvent): void {
   if (key === 'escape') {
     if (editor.drawPoints.length > 0) editor.drawPoints = []
     else if (editor.speedStart) editor.speedStart = null
+    else if (editor.connectorFrom) editor.connectorFrom = null
     else if (editor.tool !== 'select') editor.setTool('select')
     else editor.select([])
     return
@@ -223,6 +226,7 @@ watch(
             </div>
             <CompareMap v-if="editor.compareOpen" />
             <TrafficOptions />
+            <MapBalance />
             <div class="toasts" aria-live="polite">
               <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
                 {{ item.text }}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { CRS_OPTIONS, formatPosition } from '@/core/crs'
 import { useEditor } from '@/stores/editor'
 
 const editor = useEditor()
@@ -12,6 +13,7 @@ const TOOL_HINTS: Record<string, string> = {
   split: 'Щелчок по дороге или узлу разрезает дорогу на две',
   signal: 'Щелчок по узлу или дороге ставит или снимает светофор',
   crossing: 'Щелчок по узлу или дороге ставит или снимает пешеходный переход',
+  connector: 'Потяните от красной точки въезда к голубой точке выезда. Повторное соединение снимает связь, Esc отменяет выбор',
   speed: 'Два щелчка по одной дороге задают участок сниженной скорости. Esc отменяет начало',
   bump: 'Щелчок по дороге ставит лежачего полицейского и участок низкой скорости вокруг него, щелчок по нему снимает',
   sign: 'Щелчок по дороге на подходе к перекрёстку ставит или снимает знак приоритета',
@@ -46,7 +48,7 @@ const hiddenCount = computed(() => editor.hidden.ways.size + editor.hidden.nodes
 
 const position = computed(() => {
   const point = editor.cursor
-  return point ? `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}` : ''
+  return point ? formatPosition(point, editor.crs, editor.projector) : ''
 })
 
 /** Масштаб при экранном разрешении 96 точек на дюйм. */
@@ -69,6 +71,9 @@ const scale = computed(() => {
     <button v-if="editor.errorCount" class="cell link" @click="(editor.navigatorOpen = true), (editor.leftTab = 'issues')">Ошибок {{ editor.errorCount }}</button>
     <span class="cell wide">{{ counts }}</span>
     <span class="cell mono">{{ position }}</span>
+    <select v-model="editor.crs" class="crs" aria-label="Система координат" title="Система координат">
+      <option v-for="option in CRS_OPTIONS" :key="option.id" :value="option.id">{{ option.short }}</option>
+    </select>
     <span class="cell mono">{{ scale }}</span>
     <span class="cell mono">z{{ editor.zoom.toFixed(1) }}</span>
   </footer>
@@ -100,6 +105,16 @@ const scale = computed(() => {
 .cell.mono {
   min-width: 60px;
   text-align: right;
+}
+.crs {
+  flex: none;
+  height: 18px;
+  padding: 0 2px;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line-strong);
+  color: inherit;
+  font-size: 11px;
 }
 .cell.dirty,
 .cell.saving {

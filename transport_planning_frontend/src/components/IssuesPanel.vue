@@ -8,6 +8,13 @@ import { useEditor } from '@/stores/editor'
 const editor = useEditor()
 const open = reactive<Record<string, boolean>>({})
 
+interface Row {
+  key: string
+  message: string
+  /** Одна улица в файле часто разбита на участки: одинаковые сообщения показываем одной строкой. */
+  issues: Issue[]
+}
+
 const groups = computed(() => {
   const result = new Map<IssueCode, Issue[]>()
   for (const issue of editor.issues) {
@@ -15,7 +22,15 @@ const groups = computed(() => {
     if (list) list.push(issue)
     else result.set(issue.code, [issue])
   }
-  return [...result.entries()].map(([code, issues]) => ({ code, issues }))
+  return [...result.entries()].map(([code, issues]) => {
+    const rows = new Map<string, Row>()
+    for (const issue of issues) {
+      const row = rows.get(issue.message)
+      if (row) row.issues.push(issue)
+      else rows.set(issue.message, { key: issue.id, message: issue.message, issues: [issue] })
+    }
+    return { code, severity: issues[0]!.severity, total: issues.length, rows: [...rows.values()] }
+  })
 })
 
 const counts = computed(() => {
@@ -23,34 +38,49 @@ const counts = computed(() => {
   for (const issue of editor.issues) result[issue.severity]++
   return result
 })
+
+/** Ошибки видны сразу, а подсказки не занимают место, пока их не раскроют. */
+function isOpen(group: { code: string; severity: string }): boolean {
+  return open[group.code] ?? group.severity === 'error'
+}
+
+function toggle(group: { code: string; severity: string }): void {
+  open[group.code] = !isOpen(group)
+}
+
+function fixRow(row: Row): void {
+  for (const issue of row.issues) if (issue.fix) editor.applyFix(issue)
+}
 </script>
 
 <template>
   <section class="section">
     <div class="summary">
-      <span class="count error"><AlertCircle :size="13" aria-hidden="true" /> Ошибок: {{ counts.error }}</span>
-      <span class="count warning"><AlertTriangle :size="13" aria-hidden="true" /> {{ counts.warning }}</span>
-      <span class="count info"><Info :size="13" aria-hidden="true" /> {{ counts.info }}</span>
+      <span class="count error"><AlertCircle :size="13" aria-hidden="true" /> Ошибок {{ counts.error }}</span>
+      <span class="count warning"><AlertTriangle :size="13" aria-hidden="true" /> Предупреждений {{ counts.warning }}</span>
+      <span class="count info"><Info :size="13" aria-hidden="true" /> Заметок {{ counts.info }}</span>
     </div>
     <p v-if="editor.issues.length === 0" class="empty">Ошибок в сети не найдено</p>
     <template v-for="group in groups" :key="group.code">
-      <button class="group" :aria-expanded="open[group.code] ?? false" @click="open[group.code] = !open[group.code]">
-        <ChevronRight :size="13" :class="{ turned: open[group.code] }" aria-hidden="true" />
-        <span class="dot" :class="group.issues[0]!.severity" aria-hidden="true" />
+      <button class="group" :aria-expanded="isOpen(group)" @click="toggle(group)">
+        <ChevronRight :size="13" :class="{ turned: isOpen(group) }" aria-hidden="true" />
+        <span class="dot" :class="group.severity" aria-hidden="true" />
         <span class="ellipsis">{{ ISSUE_TITLES[group.code] }}</span>
-        <span class="faint">{{ group.issues.length }}</span>
+        <span class="faint">{{ group.total }}</span>
       </button>
-      <template v-if="open[group.code]">
+      <template v-if="isOpen(group)">
         <div
-          v-for="issue in group.issues.slice(0, 80)"
-          :key="issue.id"
+          v-for="row in group.rows.slice(0, 80)"
+          :key="row.key"
           class="issue"
-          :class="{ focused: editor.focusedIssue === issue.id }"
+          :class="{ focused: row.issues.some((issue) => editor.focusedIssue === issue.id) }"
         >
-          <button class="text" @click="editor.focusIssue(issue)">{{ issue.message }}</button>
-          <button v-if="issue.fix" class="btn small" @click="editor.applyFix(issue)">
+          <button class="text" title="Показать на карте" @click="editor.focusIssue(row.issues[0]!)">
+            {{ row.message }}<span v-if="row.issues.length > 1" class="times"> · участков: {{ row.issues.length }}</span>
+          </button>
+          <button v-if="row.issues[0]!.fix" class="btn small" @click="fixRow(row)">
             <Wrench :size="11" aria-hidden="true" />
-            {{ issue.fixLabel }}
+            {{ row.issues[0]!.fixLabel }}<template v-if="row.issues.length > 1"> на всех</template>
           </button>
         </div>
       </template>
@@ -64,7 +94,8 @@ const counts = computed(() => {
 }
 .summary {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   padding-bottom: 6px;
 }
 .count {
@@ -147,5 +178,8 @@ const counts = computed(() => {
 }
 .text:hover {
   color: var(--text);
+}
+.times {
+  color: var(--faint);
 }
 </style>

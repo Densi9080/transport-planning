@@ -250,10 +250,10 @@ function laneMarkingsFor(
     }
   }
   for (let i = 1; i < profile.forward; i++) {
-    divider(offsets.divider - i * profile.laneWidth, dividerMode(profile.changeForward, i - 1), 1)
+    divider(offsets.forwardBoundaries[i - 1]!, dividerMode(profile.changeForward, i - 1), 1)
   }
   for (let i = 1; i < profile.backward; i++) {
-    divider(offsets.divider + i * profile.laneWidth, dividerMode(profile.changeBackward, i - 1), -1)
+    divider(offsets.backwardBoundaries[i - 1]!, dividerMode(profile.changeBackward, i - 1), -1)
   }
 }
 
@@ -681,16 +681,23 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     laneArrows(link, trimmed, level, arrows, projector)
     elevatedSegments(doc, link, startGeometry?.trim ?? 0, endGeometry?.trim ?? 0, offsets.left, elevated, projector)
 
-    graphLinks.push(
-      lineFeature(link.points, projector, {
-        wayId: link.wayId,
-        highway: graphRoadClass(highway),
-        oneway: isOneway(tags),
-        reversed: link.profile.forward === 0,
-        lanes: link.profile.forward + link.profile.backward,
-        level,
-      }),
-    )
+    // В графе каждая полоса — отдельная линия по ходу движения: так видно число полос и их направление
+    const pushLane = (offset: number, forward: boolean) => {
+      const lane = offsetPolyline(trimmed, offset, startTangent, endTangent)
+      if (lane.length < 2) return
+      graphLinks.push(
+        lineFeature(forward ? lane : [...lane].reverse(), projector, {
+          wayId: link.wayId,
+          highway: graphRoadClass(highway),
+          oneway: true,
+          reversed: false,
+          lanes: 1,
+          level,
+        }),
+      )
+    }
+    offsets.forward.forEach((offset) => pushLane(offset, true))
+    offsets.backward.forEach((offset) => pushLane(offset, false))
   }
 
   buildCrossings(doc, network, crossings, signals, projector)

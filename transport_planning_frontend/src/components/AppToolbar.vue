@@ -27,6 +27,7 @@ import {
   TrainFrontTunnel,
   Undo2,
   Waves,
+  Workflow,
 } from 'lucide-vue-next'
 
 import { type Tool, useEditor, type ViewMode } from '@/stores/editor'
@@ -40,6 +41,7 @@ const tools: { id: Tool; label: string; key: string; icon: typeof Circle }[] = [
   { id: 'road', label: 'Новая дорога', key: 'D', icon: Route },
   { id: 'node', label: 'Новый узел', key: 'N', icon: Circle },
   { id: 'split', label: 'Разрезать дорогу', key: 'X', icon: Scissors },
+  { id: 'connector', label: 'Соединить полосы', key: 'Q', icon: Workflow },
   { id: 'signal', label: 'Светофор', key: 'T', icon: TrafficCone },
   { id: 'crossing', label: 'Пешеходный переход', key: 'C', icon: Footprints },
   { id: 'speed', label: 'Участок сниженной скорости', key: 'S', icon: Gauge },

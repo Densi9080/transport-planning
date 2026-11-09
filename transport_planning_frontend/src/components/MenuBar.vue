@@ -98,6 +98,7 @@ const menus = computed<Menu[]>(() => [
       { label: 'Новая дорога', hint: 'D', checked: editor.tool === 'road', action: () => editor.setTool('road') },
       { label: 'Новый узел', hint: 'N', checked: editor.tool === 'node', action: () => editor.setTool('node') },
       { label: 'Разрезать дорогу', hint: 'X', checked: editor.tool === 'split', action: () => editor.setTool('split') },
+      { label: 'Соединить полосы', hint: 'Q', checked: editor.tool === 'connector', action: () => editor.setTool('connector') },
       { label: 'Светофор', hint: 'T', checked: editor.tool === 'signal', action: () => editor.setTool('signal') },
       { label: 'Переход', hint: 'C', checked: editor.tool === 'crossing', action: () => editor.setTool('crossing') },
       { label: 'Участок скорости', hint: 'S', checked: editor.tool === 'speed', action: () => editor.setTool('speed') },
