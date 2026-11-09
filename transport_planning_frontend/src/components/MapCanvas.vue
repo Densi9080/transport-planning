@@ -21,6 +21,7 @@ import type { LanePort } from '@/core/lanePick'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
+import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
 import { CUSTOM_TYPES, type CustomObject, customObjectOf, TP_TYPE } from '@/core/netObjects'
 import type { LatLon, ONode, XY } from '@/core/types'
@@ -42,11 +43,17 @@ import { losFromSpeedRatio } from '@/sim/micro'
 import { signalState } from '@/sim/net'
 import { type DrawPoint, type SelectedItem, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
+import { useTraffic } from '@/stores/traffic'
 
 // Сам MapLibre ищет воркер рядом со своим модулем, а после сборки его там нет
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+/** Пропускная способность полосы, авт/ч: на быстрых дорогах выше, во дворах заметно ниже. */
+function laneCapacity(speedLimit: number): number {
+  if (speedLimit >= 60) return 1800
+  return speedLimit >= 40 ? 1200 : 500
+}
 const MIN_BOX_PX = 4
 const SIGNAL_PICK_PX = 6
 const SEGMENT_PICK_PX = 7
@@ -62,6 +69,7 @@ const OD_LINES = 150
 const editor = useEditor()
 const sim = useSimulation()
 const container = ref<HTMLDivElement | null>(null)
+const traffic = useTraffic()
 const hud = ref<{ x: number; y: number; text: string }[]>([])
 const selectionBox = ref<{ left: number; top: number; width: number; height: number } | null>(null)
 let boxStart: { x: number; y: number } | null = null
@@ -316,7 +324,8 @@ function scheduleRender(): void {
 
 function renderScene(): void {
   if (!ready || !editor.doc || !editor.projector || !map) return
-  const { scene } = buildScene(editor.doc, editor.projector)
+  const { scene, network: laneNetwork } = buildScene(editor.doc, editor.projector)
+  setData('laneLines', { type: 'FeatureCollection', features: laneLineFeatures(laneNetwork) })
   for (const feature of scene.labels.features) {
     const name = feature.properties?.name as string
     feature.properties = { ...feature.properties, image: ensureLabelImage(map, name, editor.theme) }
@@ -1455,6 +1464,21 @@ watch(() => sim.micro, () => {
   syncCars()
   applyLoadColors()
 })
+function renderTraffic(): void {
+  if (!ready || !map) return
+  const lanes = traffic.result?.lanes ?? []
+  setData('trafficLoad', {
+    type: 'FeatureCollection',
+    features: lanes.map((lane) => ({
+      type: 'Feature',
+      properties: { way: lane.way, flow: lane.flow, ratio: Math.min(1, lane.flow / laneCapacity(lane.speedLimit)) },
+      geometry: { type: 'LineString', coordinates: lane.shape },
+    })),
+  })
+  map.setLayoutProperty('traffic-lane', 'visibility', traffic.visible && lanes.length > 0 ? 'visible' : 'none')
+}
+
+watch(() => [traffic.result, traffic.visible], renderTraffic)
 watch(() => editor.mode, (mode) => {
   if (!map) return
   map.getCanvas().style.cursor = mode === 'select' || editor.tool !== 'select' ? 'crosshair' : ''

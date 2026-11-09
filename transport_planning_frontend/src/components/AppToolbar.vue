@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { BoxSelect, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
+import { Activity, BoxSelect, CarFront, Download, Maximize, PanelLeft, PanelRight, Pause, Pencil, Play, Redo2, SquarePlus, SquareTerminal, Undo2 } from 'lucide-vue-next'
 
 import { type EditMode, useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
+import { useTraffic } from '@/stores/traffic'
 
 const editor = useEditor()
 const sim = useSimulation()
+const traffic = useTraffic()
 
 const modes: { id: EditMode; label: string; hint: string; icon: typeof Pencil }[] = [
   { id: 'insert', label: 'Вставка', hint: 'Создавать объекты активного типа (Insert)', icon: SquarePlus },
@@ -48,6 +50,19 @@ function toggleSim(): void {
     <button class="btn small" :class="{ primary: editor.viewMode === 'sim' }" :aria-pressed="editor.viewMode === 'sim'" @click="toggleSim">
       <CarFront :size="13" aria-hidden="true" />
       Симуляция
+    </button>
+    <span class="sep" />
+    <label class="trips" title="Сколько случайных поездок считать за час">
+      Поездок
+      <input v-model.number="traffic.trips" class="input" type="number" min="1" max="5000" step="100" aria-label="Поездок за час" />
+    </label>
+    <button class="btn small" :disabled="traffic.running" @click="traffic.run()">
+      <Activity :size="13" aria-hidden="true" />
+      {{ traffic.running ? 'Считаем…' : 'Расчёт загрузки' }}
+    </button>
+    <button class="btn small" :disabled="traffic.running" title="Те же настройки поездок, что на сервере организаторов" @click="traffic.run(100)">100</button>
+    <button v-if="traffic.result" class="btn small" :aria-pressed="traffic.visible" @click="traffic.visible = !traffic.visible">
+      {{ traffic.visible ? 'Скрыть загрузку' : 'Показать загрузку' }}
     </button>
 
     <span class="spacer" />
@@ -106,6 +121,16 @@ function toggleSim(): void {
 }
 .modes {
   flex: none;
+}
+.trips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--muted);
+}
+.trips input {
+  width: 62px;
 }
 .spacer {
   flex: 1;

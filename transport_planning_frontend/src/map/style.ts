@@ -18,12 +18,14 @@ export const SOURCE_IDS = [
   'junctions',
   'turnPaths',
   'markings',
+  'laneLines',
   'crossings',
   'arrows',
   'signals',
   'trafficSigns',
   'labels',
   'elevated',
+  'trafficLoad',
   'simLoad',
   'simBars',
   'simBarLabels',
@@ -51,6 +53,9 @@ export const SOURCE_IDS = [
  */
 export const LOS_COLORS = ['#4aa3c7', '#6fc2b0', '#f0c94a', '#ec835a', '#d03b3b', '#e0409f']
 
+/** С этого приближения улица распадается на отдельные полосы. */
+export const LANE_LINE_ZOOM = 16.5
+
 export const COLORS = {
   background: '#141518',
   building: '#37383c',
@@ -61,6 +66,7 @@ export const COLORS = {
   rail: '#5a5d64',
   minor: '#4b4e55',
   road: '#2b2d32',
+  laneLine: '#2dd4bf',
   tunnel: '#22242a',
   bridge: '#34373d',
   bridgeEdge: '#c8ccd4',
@@ -182,15 +188,28 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-color': COLORS.marking,
       'line-width': m(0.22, 0.6),
     } },
-    { id: 'markings-lane', type: 'line', source: 'markings', minzoom: 16, filter: ['all', ground, ['==', ['get', 'kind'], 'lane']], paint: {
+    { id: 'markings-lane', type: 'line', source: 'markings', minzoom: 16, maxzoom: LANE_LINE_ZOOM, filter: ['all', ground, ['==', ['get', 'kind'], 'lane']], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.16, 0.5),
       'line-opacity': 0.85,
       'line-dasharray': [12, 18],
     } },
-    { id: 'markings-lane-solid', type: 'line', source: 'markings', minzoom: 15.5, filter: ['all', ground, ['==', ['get', 'kind'], 'lane-solid']], paint: {
+    { id: 'markings-lane-solid', type: 'line', source: 'markings', minzoom: 15.5, maxzoom: LANE_LINE_ZOOM, filter: ['all', ground, ['==', ['get', 'kind'], 'lane-solid']], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.18, 0.6),
+    } },
+    { id: 'lane-line', type: 'line', source: 'laneLines', minzoom: LANE_LINE_ZOOM, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': COLORS.laneLine,
+      'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
+    } },
+    { id: 'lane-arrow', type: 'symbol', source: 'laneLines', minzoom: LANE_LINE_ZOOM + 0.5, layout: {
+      'symbol-placement': 'line',
+      'symbol-spacing': 90,
+      'icon-image': 'direction',
+      'icon-rotate': 90,
+      'icon-size': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.35, 20, 0.7],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
     } },
     { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, paint: {
       'line-color': ['match', ['get', 'turn'], 'left', COLORS.left, 'right', COLORS.right, COLORS.through],
@@ -383,6 +402,11 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-color': ['match', ['get', 'state'], 'green', '#22c55e', 'yellow', '#facc15', '#ef4444'],
       'circle-stroke-color': '#0b0c0e',
       'circle-stroke-width': 1.5,
+    } },
+    { id: 'traffic-lane', type: 'line', source: 'trafficLoad', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': ['interpolate', ['linear'], ['get', 'ratio'], 0, '#22c55e', 0.5, '#facc15', 0.8, '#f97316', 1, '#dc2626'],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['+', 1, ['*', ['get', 'ratio'], 2]], 19, ['+', 3, ['*', ['get', 'ratio'], 7]]],
+      'line-opacity': 0.9,
     } },
     { id: 'overlay-ribbon', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'ribbon'], paint: {
       'fill-color': COLORS.accent,

@@ -76,6 +76,34 @@ export async function runPreflight(id: string, changes: Changes): Promise<Prefli
   ).json()
 }
 
+export interface TrafficLane {
+  edge: string
+  way: string
+  lane: number
+  flow: number
+  speed: number
+  speedLimit: number
+  shape: [number, number][]
+}
+
+export interface TrafficResult {
+  available: boolean
+  message?: string
+  ok?: boolean
+  trips?: number
+  period?: number
+  added?: number
+  stats?: { loaded: number; inserted: number; teleports: number; meanSpeed: number | null; meanDuration: number | null }
+  lanes?: TrafficLane[]
+  log?: string[]
+}
+
+export async function runTraffic(id: string, changes: Changes, trips: number, period: number): Promise<TrafficResult> {
+  return (
+    await ensureOk(await fetch(`/api/projects/${id}/traffic/`, jsonRequest('POST', { changes, trips, period })))
+  ).json()
+}
+
 export interface AssistantSettings {
   baseUrl: string
   model: string

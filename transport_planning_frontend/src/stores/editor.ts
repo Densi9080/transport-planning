@@ -151,7 +151,7 @@ const VALIDATE_DELAY_MS = 350
 const TOAST_MS = 3500
 const WIDE_SCREEN_PX = 1100
 const TILE_URL_KEY = 'osm-editor-tile-url'
-const THEME_KEY = 'osm-editor-theme'
+const THEME_KEY = 'osm-editor-theme-v2'
 const FILTER_KEY = 'osm-editor-filter:'
 const CRS_KEY = 'osm-editor-crs'
 const CONNECTOR_STUB_M = 25
@@ -236,7 +236,7 @@ export const useEditor = defineStore('editor', () => {
     points: true,
   })
 
-  const theme = ref<ThemeName>(readStored(THEME_KEY) === 'dark' ? 'dark' : 'light')
+  const theme = ref<ThemeName>(readStored(THEME_KEY) === 'light' ? 'light' : 'dark')
   const activeType = ref<ActiveType>('links')
   const leftTab = ref<LeftTab>('network')
   const listOpen = ref(false)

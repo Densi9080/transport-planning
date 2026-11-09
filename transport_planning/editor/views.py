@@ -15,6 +15,7 @@ from . import assistant
 from .models import Project
 from .osm_io import ChangesError, OsmFormatError, apply_changes, parse_document
 from .preflight import run_preflight
+from .traffic import TrafficError, run_traffic
 
 SAMPLE_NAME = 'example.osm'
 
@@ -107,6 +108,23 @@ class ProjectPreflightView(APIView):
         except (ChangesError, OsmFormatError) as exc:
             return Response({'detail': str(exc)}, status=400)
         return Response(run_preflight(output))
+
+
+class ProjectTrafficView(APIView):
+    """Загрузка сети по расчёту SUMO. Считается по файлу с текущими правками."""
+
+    def post(self, request, pk):
+        project = get_object_or_404(Project, pk=pk)
+        try:
+            output = apply_changes(project.read_original(), _changes_from_request(request))
+            trips = int(request.data.get('trips', 1000))
+            period = int(request.data.get('period', 3600))
+        except (ChangesError, OsmFormatError, TypeError, ValueError) as exc:
+            return Response({'detail': str(exc)}, status=400)
+        try:
+            return Response(run_traffic(output, trips=trips, period=period))
+        except TrafficError as exc:
+            return Response({'detail': str(exc)}, status=502)
 
 
 class AssistantSettingsView(APIView):

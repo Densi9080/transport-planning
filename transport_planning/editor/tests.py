@@ -404,3 +404,18 @@ class AssistantTests(TestCase):
             self.assertNotIn('env-key', json.dumps(data))
             response = self.client.put('/api/assistant/settings/', {'baseUrl': 'http://evil/v1'}, content_type='application/json')
             self.assertEqual(response.status_code, 403)
+
+
+class TrafficTests(TestCase):
+    def test_sample_network_gets_requested_trips_and_lane_flows(self):
+        from .preflight import find_netconvert
+        from .traffic import run_traffic
+
+        if find_netconvert() is None:
+            self.skipTest('SUMO не установлен')
+        data = (Path(settings.BASE_DIR) / 'samples' / 'example.osm').read_bytes()
+        result = run_traffic(data, trips=50, period=600)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['stats']['loaded'], 50)
+        self.assertGreater(len(result['lanes']), 0)
+        self.assertGreaterEqual(len(result['lanes'][0]['shape']), 2)
