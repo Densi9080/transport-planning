@@ -4,13 +4,14 @@ import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
 import { computeHidden, type FilterLogic, type FilterMode, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
-import { offsetPolyline, Projector, smoothCurve } from '@/core/geo'
+import { offsetPolyline, Projector, segmentsCross, smoothCurve } from '@/core/geo'
 import {
   addNode,
   addWay,
   deleteNode,
   deleteWay,
   insertNodeOnWay,
+  setMovementAllowed,
   joinWays,
   mergeNodes,
   reverseWay,
@@ -25,9 +26,10 @@ import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
 import { type CrsId, normalizeCrs, setCustomCrs } from '@/core/crs'
 import type { CrsEntry } from '@/core/crsCatalog'
 import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lanePorts, laneStubNearNode } from '@/core/lanePick'
-import { nodeConnectors, setLaneConnection } from '@/core/laneOps'
-import { laneOffsets, parseProfile, totalWidth } from '@/core/lanes'
-import { buildNetwork } from '@/core/topology'
+import { nodeConnectors, resetLaneConnections, setLaneConnection } from '@/core/laneOps'
+import { type TurnAttrs, writeTurnAttrs } from '@/core/turnAttrs'
+import { laneOffsets, parseProfile, totalWidth, withLanes } from '@/core/lanes'
+import { buildNetwork, junctionMovements } from '@/core/topology'
 import {
   addSpeedBump,
   applySpeedSection,
@@ -76,12 +78,22 @@ export type Tool =
   | 'stopPoint'
   | 'stopArea'
   | 'stopGroup'
-  | 'identify'
+  | 'pan'
 
 /** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
 export type ActiveType = 'auto' | 'links' | 'nodes'
 /** Режимы окна сети: вставка, редактирование и выделение рамкой. */
 export type EditMode = 'insert' | 'edit' | 'select'
+
+export interface NewLinkAttrs {
+  id: number
+  type: string
+  name: string
+  forward: number
+  backward: number
+  maxspeed: string | number
+  blockReverse: boolean
+}
 
 export interface ConsoleEntry {
   id: number
@@ -102,6 +114,7 @@ const INSERT_TOOLS: Record<NetObject, Tool> = {
   desiredSpeed: 'object',
   reducedSpeed: 'object',
   stopSigns: 'sign',
+  crossings: 'crossing',
   priorityRules: 'object',
   signals: 'signal',
   detectors: 'object',
@@ -161,6 +174,7 @@ const CRS_CUSTOM_KEY = 'osm-editor-crs-custom'
 const CRS_RECENT_LIMIT = 8
 const CONNECTOR_STUB_M = 25
 const STOP_GROUP_RADIUS_M = 100
+const TURN_MARK_M = 18
 
 function readStored(key: string): string | null {
   try {
@@ -204,8 +218,10 @@ export const useEditor = defineStore('editor', () => {
   const objectHidden = reactive<Partial<Record<NetObject, boolean>>>({})
   const objectLocked = reactive<Partial<Record<NetObject, boolean>>>({})
   const consoleOpen = ref(true)
+  const pendingRoad = shallowRef<{ points: DrawPoint[] } | null>(null)
+  const crossingStart = shallowRef<LatLon | null>(null)
+  const selectedTurn = shallowRef<{ node: number; from: number; to: number } | null>(null)
   const objectFilter = reactive<Partial<Record<NetObject, ObjectFilter>>>({})
-  const identified = shallowRef<(LatLon & { label: string }) | null>(null)
   /** Куда пользователь хотел перейти, пока не решил судьбу несохранённых правок. */
   const leaveRequest = ref<EditMode | 'sim' | null>(null)
   const selectedLane = shallowRef<{ wayId: number; forward: boolean; lane: number; points: XY[] } | null>(null)
@@ -278,6 +294,7 @@ export const useEditor = defineStore('editor', () => {
     labels: true,
     issues: true,
     transit: false,
+    markings: false,
     other: true,
     points: true,
   })
@@ -386,6 +403,8 @@ export const useEditor = defineStore('editor', () => {
     return doc.value?.changeCount ?? 0
   })
   watch(selection, (items) => {
+    const turn = selectedTurn.value
+    if (turn && !items.some((item) => item.kind === 'node' && item.id === turn.node)) selectedTurn.value = null
     const lane = selectedLane.value
     if (lane && !items.some((item) => item.kind === 'way' && item.id === lane.wayId)) selectedLane.value = null
   })
@@ -678,6 +697,7 @@ export const useEditor = defineStore('editor', () => {
     if (tool.value === 'road' && next !== 'road') drawPoints.value = []
     speedStart.value = null
     connectorFrom.value = null
+    crossingStart.value = null
     tool.value = next
     const object = OBJECT_OF_TOOL.get(next)
     if (object) {
@@ -697,7 +717,117 @@ export const useEditor = defineStore('editor', () => {
     selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, points: lanePolyline(hit) } : null
   }
 
+  function selectTurn(node: number, from: number, to: number): void {
+    selection.value = [{ kind: 'node', id: node }]
+    selectedTurn.value = { node, from, to }
+    inspectorOpen.value = true
+  }
+
+  /** Манёвры с подхода выбранного поворота, включая разворот. */
+  const turnMovements = computed(() => {
+    void rev.value
+    const turn = selectedTurn.value
+    const d = doc.value
+    const net = network.value
+    if (!turn || !d || !net) return []
+    return junctionMovements(d, net, turn.node).filter((item) => item.from.neighbor === turn.from)
+  })
+
+  /** Что подсветить на карте: откуда и куда ведёт выбранный поворот. */
+  const turnPreview = computed(() => {
+    void rev.value
+    const turn = selectedTurn.value
+    const d = doc.value
+    const p = projector.value
+    if (!turn || !d || !p) return null
+    const via = d.nodes.get(turn.node)
+    const from = d.nodes.get(turn.from)
+    const to = d.nodes.get(turn.to)
+    if (!via || !from || !to) return null
+    const center = p.toXY(via)
+    const paths = nodeConnectors(d, p, turn.node).connectors.filter((c) => c.from.neighbor === turn.from && c.to.neighbor === turn.to).map((c) => c.points)
+    const toward = (target: XY): XY => {
+      const dx = target.x - center.x
+      const dy = target.y - center.y
+      const length = Math.hypot(dx, dy) || 1
+      const reach = Math.min(TURN_MARK_M, length)
+      return { x: center.x + (dx / length) * reach, y: center.y + (dy / length) * reach }
+    }
+    const start = paths[0]?.[0] ?? toward(p.toXY(from))
+    const end = paths[0]?.at(-1) ?? toward(p.toXY(to))
+    return { paths: paths.length ? paths : [[start, center, end]], start, end }
+  })
+
+  function setTurnAllowed(toNeighbor: number, allowed: boolean): void {
+    const turn = selectedTurn.value
+    if (!turn) return
+    mutate(allowed ? 'Поворот разрешён' : 'Поворот запрещён', (d, p) => setMovementAllowed(d, p, turn.node, turn.from, toNeighbor, allowed))
+  }
+
+  function applyTurnTemplate(template: 'noLeft' | 'noRight' | 'onlyStraight' | 'noUturn' | 'all'): void {
+    const turn = selectedTurn.value
+    if (!turn) return
+    const plan = turnMovements.value.map((item) => {
+      let allowed = item.allowed
+      if (template === 'all') allowed = true
+      if (template === 'noLeft' && item.kind === 'left') allowed = false
+      if (template === 'noRight' && item.kind === 'right') allowed = false
+      if (template === 'noUturn' && item.kind === 'reverse') allowed = false
+      if (template === 'onlyStraight') allowed = item.kind === 'through'
+      return { to: item.to.neighbor, allowed, changed: allowed !== item.allowed }
+    })
+    mutate('Шаблон запретов поворотов', (d, p) => {
+      for (const item of plan) if (item.changed) setMovementAllowed(d, p, turn.node, turn.from, item.to, item.allowed)
+    })
+  }
+
+  function updateTurnAttrs(attrs: TurnAttrs): void {
+    const turn = selectedTurn.value
+    if (turn) mutate('Атрибуты поворота', (d) => writeTurnAttrs(d, turn.node, turn.from, turn.to, attrs))
+  }
+
+  function resetTurnRules(): void {
+    const turn = selectedTurn.value
+    if (turn) mutate('Соединения полос по ПДД', (d) => resetLaneConnections(d, turn.node))
+  }
+
+  /** Переход задаётся началом и концом, а его центр встаёт там, где линия пересекла дорогу. */
+  function finishCrossing(end: LatLon): void {
+    const start = crossingStart.value
+    const net = network.value
+    const p = projector.value
+    if (!start || !net || !p) return
+    const a = p.toXY(start)
+    const b = p.toXY(end)
+    let found: { wayId: number; point: XY } | null = null
+    for (const link of net.links) {
+      for (let i = 1; i < link.points.length && !found; i++) {
+        const point = segmentsCross(a, b, link.points[i - 1]!, link.points[i]!)
+        if (point) found = { wayId: link.wayId, point }
+      }
+      if (found) break
+    }
+    if (!found) {
+      toast('Линия перехода должна пересекать дорогу', 'error')
+      return
+    }
+    const road = found
+    const id = mutate('Пешеходный переход', (d, proj) => {
+      const first = addNode(d, start)
+      const last = addNode(d, end)
+      const center = insertNodeOnWay(d, proj, road.wayId, proj.toLatLon(road.point))
+      setNodeTags(d, center, { ...(d.node(center).tags ?? {}), highway: 'crossing', crossing: 'marked' })
+      return addWay(d, [first, center, last], { highway: 'footway', footway: 'crossing', crossing: 'marked' })
+    })
+    crossingStart.value = null
+    if (id !== undefined) {
+      selectOne({ kind: 'way', id })
+      toast('Переход добавлен. Точки начала, центра и конца можно двигать', 'success')
+    }
+  }
+
   function chooseObject(next: NetObject): void {
+    selectedTurn.value = null
     activeObject.value = next
     activeType.value = pickTypeOf(next)
     selection.value = []
@@ -1157,11 +1287,44 @@ export const useEditor = defineStore('editor', () => {
     parallelSelected(totalWidth(parseProfile(way.tags ?? {})) + 2, 1, 'Дублирование дороги')
   }
 
+  /** Завершение рисования только спрашивает атрибуты: в сеть отрезок попадёт после ОК. */
   function finishRoad(): void {
-    const points = drawPoints.value
+    if (drawPoints.value.length < 2) return
+    pendingRoad.value = { points: drawPoints.value }
+  }
+
+  function cancelRoadDialog(): void {
+    pendingRoad.value = null
+  }
+
+  function undoDrawPoint(): void {
+    drawPoints.value = drawPoints.value.slice(0, -1)
+  }
+
+  function cancelInsert(): void {
+    drawPoints.value = []
+    crossingStart.value = null
+    connectorFrom.value = null
+    speedStart.value = null
+  }
+
+  function confirmRoad(attrs: NewLinkAttrs): void {
+    const points = pendingRoad.value?.points ?? []
+    pendingRoad.value = null
     drawPoints.value = []
     if (points.length < 2) return
-    const tags = { ...preset.value.tags }
+    let tags: Tags = { ...preset.value.tags, highway: attrs.type }
+    delete tags.name
+    if (attrs.name.trim()) tags.name = attrs.name.trim()
+    if (String(attrs.maxspeed).trim()) tags.maxspeed = String(attrs.maxspeed).trim()
+    else delete tags.maxspeed
+    if (attrs.blockReverse) {
+      tags.oneway = 'yes'
+      tags = withLanes(tags, attrs.forward, 0)
+    } else {
+      delete tags.oneway
+      tags = withLanes(tags, attrs.forward, attrs.backward)
+    }
     const wayId = mutate('Новая дорога', (d, p) => {
       const resolve = (point: DrawPoint): number => {
         if (point.nodeId !== undefined) return point.nodeId
@@ -1178,13 +1341,13 @@ export const useEditor = defineStore('editor', () => {
       } else {
         nds = points.map(resolve)
       }
-      return addWay(d, nds, tags)
+      d.reserveId(attrs.id)
+      d.putWay({ id: attrs.id, nds, tags })
+      return attrs.id
     })
     if (wayId !== undefined) {
       // Сразу показываем свойства новой дороги: следующую начнут клавишей D
-      tool.value = 'select'
-      selectOne({ kind: 'way', id: wayId })
-      toast('Дорога создана', 'success')
+      toast(`Отрезок ${wayId} создан`, 'success')
     }
   }
 
@@ -1213,6 +1376,21 @@ export const useEditor = defineStore('editor', () => {
     objectHidden,
     objectLocked,
     consoleOpen,
+    pendingRoad,
+    cancelRoadDialog,
+    confirmRoad,
+    undoDrawPoint,
+    cancelInsert,
+    crossingStart,
+    finishCrossing,
+    selectedTurn,
+    selectTurn,
+    turnMovements,
+    turnPreview,
+    setTurnAllowed,
+    applyTurnTemplate,
+    updateTurnAttrs,
+    resetTurnRules,
     crsDialogOpen,
     recentCrs,
     customCrs,
@@ -1220,7 +1398,6 @@ export const useEditor = defineStore('editor', () => {
     addCustomCrs,
     removeCustomCrs,
     objectFilter,
-    identified,
     leaveRequest,
     saveNow,
     resolveLeave,

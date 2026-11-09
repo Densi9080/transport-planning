@@ -10,6 +10,7 @@ import AssistantPanel from './AssistantPanel.vue'
 import LaneSection from './LaneSection.vue'
 import NetObjectInspector from './NetObjectInspector.vue'
 import NodeInspector from './NodeInspector.vue'
+import TurnInspector from './TurnInspector.vue'
 import RoadPresets from './RoadPresets.vue'
 import SimPanel from './SimPanel.vue'
 import WayInspector from './WayInspector.vue'
@@ -40,6 +41,7 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
     <div v-show="editor.rightTab === 'quick'" class="quick">
     <SimPanel v-if="editor.viewMode === 'sim'" />
     <RoadPresets v-else-if="editor.tool === 'road'" />
+    <TurnInspector v-else-if="editor.selectedTurn" :key="`turn${editor.selectedTurn.node}-${editor.selectedTurn.from}`" />
     <template v-else-if="isSingleWay">
       <LaneSection :way="ways[0]!" />
       <WayInspector :key="ways[0]!.id" :way="ways[0]!" />

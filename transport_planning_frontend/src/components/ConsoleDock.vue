@@ -11,6 +11,56 @@ const editor = useEditor()
 const tab = ref<Tab>('error')
 const query = ref('')
 const ROW_LIMIT = 400
+const input = ref('')
+
+const HELP = 'Команды: help, clear, count, find <номер>, goto <широта, долгота>. Любой другой текст сохраняется как заметка'
+
+/** Строка ввода консоли: команды редактора и заметки в журнал. */
+function runInput(): void {
+  const text = input.value.trim()
+  if (!text) return
+  input.value = ''
+  tab.value = 'log'
+  editor.logConsole('info', 'Ввод', text)
+  const [command = '', ...rest] = text.split(/\s+/)
+  const argument = rest.join(' ')
+  switch (command.toLowerCase()) {
+    case 'help':
+      editor.logConsole('info', 'Консоль', HELP)
+      return
+    case 'clear':
+      editor.consoleLog = []
+      return
+    case 'count':
+      editor.logConsole('info', 'Консоль', `Узлов ${editor.doc?.nodes.size ?? 0}, линий ${editor.doc?.ways.size ?? 0}, отношений ${editor.doc?.relations.size ?? 0}, ошибок ${counts.value.error}`)
+      return
+    case 'find': {
+      const id = Number(argument)
+      const node = editor.doc?.nodes.get(id)
+      if (editor.doc?.ways.has(id)) {
+        editor.selectOne({ kind: 'way', id })
+        editor.focusWay(id)
+      } else if (node) {
+        editor.selectOne({ kind: 'node', id })
+        editor.focusOn(node, 18)
+      } else {
+        editor.logConsole('warning', 'Консоль', `Объект ${argument} не найден`)
+      }
+      return
+    }
+    case 'goto': {
+      const [lat, lon] = argument.split(/[,\s]+/).map(Number)
+      if (lat === undefined || lon === undefined || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+        editor.logConsole('warning', 'Консоль', 'Нужны широта и долгота: goto 52.267, 104.257')
+        return
+      }
+      editor.focusOn({ lat, lon }, 18)
+      return
+    }
+    default:
+      editor.logConsole('info', 'Заметка', text)
+  }
+}
 
 const counts = computed(() => {
   const result = { error: 0, warning: 0, info: 0 }
@@ -106,6 +156,10 @@ function objectLabel(issue: Issue): string {
       <p v-if="tab === 'log' && logRows.length === 0" class="empty">Журнал пуст</p>
       <p v-if="tab !== 'log' && issueRows.length > ROW_LIMIT" class="empty">Показаны первые {{ ROW_LIMIT }} из {{ issueRows.length }}</p>
     </div>
+    <form class="prompt" @submit.prevent="runInput">
+      <span aria-hidden="true">&gt;</span>
+      <input v-model="input" class="input" placeholder="Команда или заметка. help покажет список команд" aria-label="Строка консоли" />
+    </form>
   </section>
 </template>
 
@@ -170,6 +224,18 @@ header {
   padding: 0;
   background: transparent;
   border: 0;
+}
+.prompt {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-top: 1px solid var(--line-strong);
+}
+.prompt input {
+  flex: 1;
+  font-family: ui-monospace, Consolas, monospace;
 }
 .body {
   flex: 1;

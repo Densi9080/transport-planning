@@ -8,7 +8,6 @@ import ConsoleDock from '@/components/ConsoleDock.vue'
 import CrsDialog from '@/components/CrsDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
-import IdentifyCard from '@/components/IdentifyCard.vue'
 import SaveGuardDialog from '@/components/SaveGuardDialog.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
 import JunctionEditor from '@/components/JunctionEditor.vue'
@@ -18,6 +17,7 @@ import ListDock from '@/components/ListDock.vue'
 import MapBalance from '@/components/MapBalance.vue'
 import MapCanvas from '@/components/MapCanvas.vue'
 import MenuBar from '@/components/MenuBar.vue'
+import NewLinkDialog from '@/components/NewLinkDialog.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import ToolDock from '@/components/ToolDock.vue'
 import TrafficOptions from '@/components/TrafficOptions.vue'
@@ -44,7 +44,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   l: 'bump',
   p: 'sign',
   q: 'connector',
-  i: 'identify',
+  k: 'pan',
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -73,7 +73,7 @@ function changeLanes(delta: number): void {
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
   // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
-  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen) return
+  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen || editor.pendingRoad) return
   const key = event.key.toLowerCase()
   const code = event.code
 
@@ -126,6 +126,7 @@ function onKeyDown(event: KeyboardEvent): void {
   if (key === 'escape') {
     if (editor.drawPoints.length > 0) editor.drawPoints = []
     else if (editor.speedStart) editor.speedStart = null
+    else if (editor.crossingStart) editor.crossingStart = null
     else if (editor.connectorFrom) editor.connectorFrom = null
     else if (editor.tool !== 'select') editor.setTool('select')
     else editor.select([])
@@ -251,7 +252,6 @@ watch(
             <CompareMap v-if="editor.compareOpen" />
             <TrafficOptions />
             <MapBalance />
-            <IdentifyCard />
             <ToolDock v-if="editor.viewMode !== 'sim'" />
             <div class="toasts" aria-live="polite">
               <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">
@@ -269,6 +269,7 @@ watch(
       <HelpDialog v-if="editor.helpOpen" />
       <SaveGuardDialog v-if="editor.leaveRequest" />
       <CrsDialog v-if="editor.crsDialogOpen" />
+      <NewLinkDialog v-if="editor.pendingRoad" />
       <JunctionEditor v-if="editor.junctionNode !== null" :key="editor.junctionNode" />
       <AssistantSettingsDialog v-if="assistant.settingsOpen" />
     </template>

@@ -17,6 +17,8 @@ import {
   sub,
   trimPolyline,
   unit,
+  cross,
+  nearestOnSegment,
 } from './geo'
 import {
   type DividerMode,
@@ -79,6 +81,11 @@ const LANE_ARROW_FROM_END_M = 7
 const ZEBRA_STRIPE_M = 0.55
 const ZEBRA_GAP_M = 0.65
 const ZEBRA_DEPTH_M = 3.2
+const HALF_LANE_M = 1.75
+const ZIGZAG_LENGTH_M = 20
+const ZIGZAG_STEPS = 16
+const ZIGZAG_DEPTH_M = 0.9
+const STOP_ROAD_REACH_M = 30
 const ELEVATED_STEP_M = 4
 const HALF_DIVIDER_M = 0.12
 const MIN_VISIBLE_HEIGHT_M = 0.15
@@ -320,6 +327,49 @@ function pathLength(points: XY[]): number {
 }
 
 /** Какие полосы подхода выполняют манёвр: по turn:lanes, а если их нет, то по правилам разметки. */
+/** Стоп-линия 1.12 поперёк всех полос подхода. */
+function stopLine(geometry: ArmGeometry, arm: Arm, projector: Projector): Feature {
+  const first = lanePoint(geometry, 0, true)
+  const last = lanePoint(geometry, arm.lanesIn - 1, true)
+  const across = arm.lanesIn > 1 ? unit(sub(last, first)) : leftNormal(geometry.dir)
+  return lineFeature([sub(first, scale(across, HALF_LANE_M)), add(last, scale(across, HALF_LANE_M))], projector, { kind: 'stop-line', level: levelOf(arm.link) })
+}
+
+/** Зигзаг 1.17 на правом краю проезжей части: место остановки маршрутного транспорта. */
+function stopZigzag(link: Link, along: number, side: 1 | -1, projector: Projector): Feature {
+  const edge = (side * totalWidth(link.profile)) / 2
+  const points: XY[] = []
+  for (let i = 0; i <= ZIGZAG_STEPS; i++) {
+    const position = Math.max(0, Math.min(link.length, along + (i / ZIGZAG_STEPS - 0.5) * ZIGZAG_LENGTH_M))
+    const { point, dir } = pointAlong(link.points, position)
+    const inset = i % 2 === 0 ? 0 : -side * ZIGZAG_DEPTH_M
+    points.push(add(point, scale(leftNormal(dir), edge + inset)))
+  }
+  return lineFeature(points, projector, { kind: 'zigzag', level: link.level })
+}
+
+/** Ближайшее к остановке место на дороге: в OSM знак остановки часто стоит на тротуаре. */
+function nearestRoadPlace(network: Network, point: XY): { link: Link; along: number; side: 1 | -1 } | null {
+  let best: { link: Link; along: number; side: 1 | -1 } | null = null
+  let bestDistance = STOP_ROAD_REACH_M
+  for (const link of network.links) {
+    if (link.bridge || link.tunnel) continue
+    let walked = 0
+    for (let i = 1; i < link.points.length; i++) {
+      const a = link.points[i - 1]!
+      const b = link.points[i]!
+      const hit = nearestOnSegment(point, a, b)
+      if (hit.distance < bestDistance) {
+        bestDistance = hit.distance
+        const offset = cross(unit(sub(b, a)), sub(point, hit.point))
+        best = { link, along: walked + dist(a, hit.point), side: offset > 0 ? 1 : -1 }
+      }
+      walked += dist(a, b)
+    }
+  }
+  return best
+}
+
 function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags = false): number[] {
   const profile = arm.link.profile
   const turns = arm.atStart ? profile.turnsBackward : profile.turnsForward
@@ -517,6 +567,20 @@ function zebra(
   }
 }
 
+/** Зебра по заданной линии: начало и конец ставит пользователь, поэтому переход может идти под углом к дороге. */
+function zebraBetween(a: XY, b: XY, roadDir: XY, wayId: number, output: Feature[], projector: Projector): void {
+  const axis = unit(sub(b, a))
+  const length = dist(a, b)
+  const step = ZEBRA_STRIPE_M + ZEBRA_GAP_M
+  const count = Math.floor(length / step)
+  const halfStripe = scale(axis, ZEBRA_STRIPE_M / 2)
+  const halfLength = scale(roadDir, ZEBRA_DEPTH_M / 2)
+  for (let i = 0; i < count; i++) {
+    const c = add(a, scale(axis, step * (i + 0.5)))
+    output.push(polygonFeature([add(add(c, halfStripe), halfLength), add(sub(c, halfStripe), halfLength), sub(sub(c, halfStripe), halfLength), sub(add(c, halfStripe), halfLength)], projector, { wayId }))
+  }
+}
+
 function buildCrossings(
   doc: OsmDoc,
   network: Network,
@@ -525,6 +589,7 @@ function buildCrossings(
   projector: Projector,
 ): void {
   const seenSignal = new Set<number>()
+  const crossingDirs = new Map<number, XY>()
   for (const link of network.links) {
     const nodes = link.nodes
     nodes.forEach((id, index) => {
@@ -534,7 +599,10 @@ function buildCrossings(
       let along = 0
       for (let i = 1; i <= index; i++) along += dist(link.points[i - 1]!, link.points[i]!)
       const { point, dir } = pointAlong(link.points, along)
-      if (tags.highway === 'crossing' || tags.crossing) {
+      const hasOwnLine = doc.waysOfNode(id).some((wayId) => doc.ways.get(wayId)?.tags?.footway === 'crossing')
+      if (hasOwnLine) {
+        crossingDirs.set(id, dir)
+      } else if (tags.highway === 'crossing' || tags.crossing) {
         zebra(point, dir, totalWidth(link.profile), link.wayId, id, crossings, projector)
       }
       if (tags.highway === 'traffic_signals' && !seenSignal.has(id)) {
@@ -542,6 +610,13 @@ function buildCrossings(
         signals.push(pointFeature(point, projector, { node: id }))
       }
     })
+  }
+  for (const way of doc.ways.values()) {
+    if (way.tags?.footway !== 'crossing' || way.nds.length < 2) continue
+    const road = way.nds.map((id) => crossingDirs.get(id)).find(Boolean)
+    const first = projector.toXY(doc.node(way.nds[0]!))
+    const last = projector.toXY(doc.node(way.nds.at(-1)!))
+    if (road) zebraBetween(first, last, road, way.id, crossings, projector)
   }
   for (const node of doc.nodes.values()) {
     if (node.tags?.highway === 'traffic_signals' && !seenSignal.has(node.id)) {
@@ -664,7 +739,14 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     if (arms.length >= 3) {
       const approaches = approachSlots(arms)
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
-        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0 }))
+        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor }))
+      }
+    }
+    const nodeTags = doc.node(node).tags
+    if (nodeTags?.highway === 'traffic_signals' || nodeTags?.highway === 'stop') {
+      for (const arm of arms) {
+        const geometry = geometries.get(arm)
+        if (geometry && arm.lanesIn > 0) markings.push(stopLine(geometry, arm, projector))
       }
     }
     if (arms.length !== 2 || !isSeamless(arms)) {
@@ -673,6 +755,13 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
         graphNodes.push(pointFeature(position, projector, { node, degree: arms.length }))
       }
     }
+  }
+
+  for (const node of doc.nodes.values()) {
+    const tags = node.tags
+    if (tags?.public_transport !== 'stop_position' && tags?.highway !== 'bus_stop') continue
+    const place = nearestRoadPlace(network, projector.toXY(node))
+    if (place) markings.push(stopZigzag(place.link, place.along, place.side, projector))
   }
 
   const linkArms = armsByLink(network)

@@ -27,6 +27,7 @@ import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE }
 import type { LatLon, ONode, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
 import { CarLayer } from '@/map/carLayer'
+import CoordMenu from '@/components/CoordMenu.vue'
 import {
   basemapSource,
   buildLayers,
@@ -50,6 +51,9 @@ import { useTraffic } from '@/stores/traffic'
 setWorkerUrl(mapWorkerUrl)
 
 const NODE_PICK_PX = 11
+/** Выше этой отметки машина уже на мосту и должна быть видна поверх него. */
+const BRIDGE_CAR_Z_M = 1.5
+const TURN_PICK_PX = 5
 /** Пропускная способность полосы, авт/ч: на быстрых дорогах выше, во дворах заметно ниже. */
 function laneCapacity(speedLimit: number): number {
   if (speedLimit >= 60) return 1800
@@ -72,6 +76,8 @@ const sim = useSimulation()
 const container = ref<HTMLDivElement | null>(null)
 const traffic = useTraffic()
 const hud = ref<{ x: number; y: number; text: string }[]>([])
+const insertMenu = ref<{ x: number; y: number } | null>(null)
+const coordMenu = ref<{ x: number; y: number; lat: number; lon: number } | null>(null)
 const selectionBox = ref<{ left: number; top: number; width: number; height: number } | null>(null)
 let boxStart: { x: number; y: number } | null = null
 let boxShift = false
@@ -535,7 +541,12 @@ function renderOverlay(): void {
   for (const { node, type } of customNodes.value) {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
-  if (editor.identified) features.push(pointOf(editor.identified, { role: 'snap' }))
+  const turnView = editor.turnPreview
+  if (turnView) {
+    for (const path of turnView.paths) features.push(lineOf(path, { role: 'turn-selected' }))
+    features.push(pointOf(projector.toLatLon(turnView.start), { role: 'turn-start' }))
+    features.push(pointOf(projector.toLatLon(turnView.end), { role: 'turn-end' }))
+  }
   if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
 
@@ -557,7 +568,7 @@ function renderOverlay(): void {
   if (snap) features.push(pointOf(snap.position, { role: 'snap' }))
 
   if (editor.tool === 'road') renderDrawPreview(features)
-  else hud.value = []
+  else hud.value = editLabels()
   if (editor.speedStart) features.push(pointOf(editor.speedStart.position, { role: 'draw-point' }))
   const connector = editor.connectorPreview
   if (connector) {
@@ -593,6 +604,34 @@ function renderOverlay(): void {
   }
 
   setData('overlay', { type: 'FeatureCollection', features })
+}
+
+function segmentLabel(a: XY, b: XY): { x: number; y: number; text: string } {
+  const projector = editor.projector!
+  const middle = projector.toLatLon({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+  const screen = map!.project([middle.lon, middle.lat])
+  return { x: screen.x, y: screen.y, text: `${dist(a, b).toFixed(1)} м · ${formatAngle(a, b)}` }
+}
+
+/** Длина и направление отрезков, пока их меняют, как при рисовании новой дороги. */
+function editLabels(): { x: number; y: number; text: string }[] {
+  const doc = editor.doc!
+  const projector = editor.projector!
+  const labels: { x: number; y: number; text: string }[] = []
+  if (drag?.moved) {
+    const moved = projector.toXY(doc.node(drag.nodeId))
+    for (const wayId of doc.waysOfNode(drag.nodeId)) {
+      const nds = doc.way(wayId).nds
+      nds.forEach((id, index) => {
+        if (id !== drag!.nodeId) return
+        for (const near of [nds[index - 1], nds[index + 1]]) {
+          if (near !== undefined) labels.push(segmentLabel(projector.toXY(doc.node(near)), moved))
+        }
+      })
+    }
+  }
+  if (editor.tool === 'crossing' && editor.crossingStart && leash) labels.push(segmentLabel(projector.toXY(editor.crossingStart), leash.cursor))
+  return labels
 }
 
 function formatAngle(from: XY, to: XY): string {
@@ -705,10 +744,14 @@ function onMouseMove(event: MapMouseEvent): void {
   hover = next
   const hadLeash = !!leash
   updateLeash(event.lngLat, next)
+  if (editor.tool === 'crossing') {
+    const cursor = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
+    leash = { cursor, target: editor.crossingStart ? editor.projector!.toXY(editor.crossingStart) : null }
+  }
   if (leash || hadLeash) scheduleOverlay()
   const canvas = map!.getCanvas()
   if (editor.tool === 'select' && editor.mode !== 'select') canvas.style.cursor = next ? (next.kind === 'way' ? 'pointer' : 'move') : ''
-  else canvas.style.cursor = 'crosshair'
+  else canvas.style.cursor = editor.tool === 'pan' ? 'grab' : 'crosshair'
   if (changed) scheduleOverlay()
 }
 
@@ -786,6 +829,8 @@ function finishBox(): void {
 }
 
 function onMouseDown(event: MapMouseEvent): void {
+  insertMenu.value = null
+  coordMenu.value = null
   if (editor.viewMode === 'sim') return
   if (editor.mode === 'select' && event.originalEvent.button === 0) {
     boxStart = { x: event.point.x, y: event.point.y }
@@ -896,6 +941,15 @@ function onClick(event: MapMouseEvent): void {
     case 'select': {
       if (hit?.kind === 'mid') return
       const isSim = editor.viewMode === 'sim'
+      if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
+        const { x, y } = event.point
+        const turn = map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] })[0]
+        const props = turn?.properties as { node?: number; from?: number; to?: number } | undefined
+        if (props?.node !== undefined && props.from !== undefined && props.to !== undefined) {
+          editor.selectTurn(props.node, props.from, props.to)
+          return
+        }
+      }
       // Вершины выбранного отрезка двигают мышью, щелчок по ним не должен менять выбор
       if (hit?.kind === 'node' && editor.activeObject === 'links' && !isSim) return
       const accepted = hit && (isSim || (hit.kind === 'node' ? editor.acceptsNode(hit.id) : editor.acceptsWay(hit.id)))
@@ -910,13 +964,6 @@ function onClick(event: MapMouseEvent): void {
           else editor.selectedLane = null
         }
       }
-      break
-    }
-    case 'identify': {
-      let label = 'Точка на карте'
-      if (hit?.kind === 'node') label = editor.doc!.node(hit.id).tags?.name ?? `Узел ${hit.id}`
-      else if (hit?.kind === 'way') label = editor.doc!.way(hit.id).tags?.name ?? `Отрезок ${hit.id}`
-      editor.identified = { ...position, label }
       break
     }
     case 'object':
@@ -944,8 +991,13 @@ function onClick(event: MapMouseEvent): void {
       if (hit?.kind === 'node') editor.splitAtNode(hit.id)
       else if (hit?.kind === 'way') editor.splitAtPosition(hit.id, editor.projector!.toLatLon(hit.point))
       break
-    case 'signal':
     case 'crossing':
+      if (editor.crossingStart) editor.finishCrossing(position)
+      else if (hit?.kind === 'node' && editor.doc!.node(hit.id).tags?.highway === 'crossing') editor.toggleOnNode('crossing', { nodeId: hit.id, position })
+      else editor.crossingStart = position
+      scheduleOverlay()
+      break
+    case 'signal':
       if (hit?.kind === 'node') editor.toggleOnNode(editor.tool, { nodeId: hit.id, position })
       else if (hit?.kind === 'way') {
         editor.toggleOnNode(editor.tool, { wayId: hit.id, position: editor.projector!.toLatLon(hit.point) })
@@ -1044,6 +1096,17 @@ function applyView(): void {
   visible(['sim-jams', 'sim-signals'], micro)
   visible(['arrows'], lane && editor.layers.arrows && !editor.objectHidden.links)
   visible(['node-dots'], lane && !isSim && !editor.objectHidden.nodes)
+  // Полосы и разметка показываются по очереди, иначе на дороге лежат два слоя линий
+  const marks = editor.layers.markings
+  const roads = lane && !editor.objectHidden.links
+  visible(['lane-line', 'lane-arrow'], roads && !marks)
+  visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths && !editor.objectHidden.turns && !marks)
+  visible(['marking-stop', 'marking-zigzag'], roads && marks)
+  const markTop = marks ? 24 : LANE_LINE_ZOOM
+  m.setLayerZoomRange('markings-edge', 15, markTop)
+  m.setLayerZoomRange('markings-divider', 15, markTop)
+  m.setLayerZoomRange('markings-lane', 16, markTop)
+  m.setLayerZoomRange('markings-lane-solid', 15.5, markTop)
   visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
   visible(['net-stop-area'], !isSim && !editor.objectHidden.stopAreas)
   visible(['net-stop'], !isSim && !editor.objectHidden.stops)
@@ -1202,6 +1265,7 @@ function publishCamera(): void {
 }
 
 let carLayer: CarLayer | null = null
+let carLayerTop: CarLayer | null = null
 let simFrame = 0
 let lastFrameTime = 0
 let lastSignalsAt = 0
@@ -1355,8 +1419,11 @@ function simLoop(now: number): void {
   if (!micro) return
   sim.frame(seconds)
   carLayer.cars = micro.cars
+  if (carLayerTop) carLayerTop.cars = micro.cars
   carLayer.alpha = sim.alpha
+  if (carLayerTop) carLayerTop.alpha = sim.alpha
   carLayer.colorMode = sim.colorMode
+  if (carLayerTop) carLayerTop.colorMode = sim.colorMode
   if (sim.running) {
     map.triggerRepaint()
     if (now - lastSignalsAt > 400) {
@@ -1370,6 +1437,7 @@ function syncCars(): void {
   if (!carLayer) return
   const showCars = editor.viewMode === 'sim' && sim.level === 'micro'
   carLayer.cars = showCars ? (sim.micro?.cars ?? []) : []
+  if (carLayerTop) carLayerTop.cars = showCars ? (sim.micro?.cars ?? []) : []
   map?.triggerRepaint()
 }
 
@@ -1412,8 +1480,7 @@ onMounted(() => {
   map = instance
   if (import.meta.env.DEV) (window as unknown as { __map: MlMap }).__map = instance
   instance.doubleClickZoom.disable()
-  // Левая кнопка занята правкой, карта двигается зажатым колёсиком, как в Visum и Vissim
-  instance.dragPan.disable()
+  // Левая кнопка двигает карту, а правка и выделение отменяют это для своего жеста. Зажатое колёсико работает всегда
   let wheelPan: { x: number; y: number } | null = null
   const canvasContainer = instance.getCanvasContainer()
   canvasContainer.addEventListener('mousedown', (event) => {
@@ -1445,12 +1512,15 @@ onMounted(() => {
     registerIcons(instance)
     for (const layer of buildLayers(center[1])) instance.addLayer(layer)
     ready = true
-    carLayer = new CarLayer(editor.projector!)
+    carLayer = new CarLayer(editor.projector!, 'cars', (car) => car.z < BRIDGE_CAR_Z_M)
+    carLayerTop = new CarLayer(editor.projector!, 'cars-top', (car) => car.z >= BRIDGE_CAR_Z_M)
     carLayer.limitOf = (car) => {
       const edge = car.route[car.routeIndex]
       return edge ? parseSpeed(edge.tags.maxspeed, edge.tags.highway ?? 'road') / 3.6 : 14
     }
-    instance.addLayer(carLayer, 'buildings-3d')
+    carLayerTop.limitOf = carLayer.limitOf
+    instance.addLayer(carLayer, 'bridge-casing')
+    instance.addLayer(carLayerTop, 'buildings-3d')
     backdrop = buildStaticScene(doc)
     applyStatic()
     applyView()
@@ -1480,6 +1550,12 @@ onMounted(() => {
     if (editor.tool === 'connector') scheduleOverlay()
   })
   instance.on('click', onClick)
+  instance.on('contextmenu', (event) => {
+    const inserting = editor.drawPoints.length > 0 || !!editor.crossingStart || !!editor.connectorFrom || !!editor.speedStart
+    insertMenu.value = inserting ? { x: event.point.x, y: event.point.y } : null
+    coordMenu.value = editor.tool === 'pan' ? { x: event.point.x, y: event.point.y, lat: event.lngLat.lat, lon: event.lngLat.lng } : null
+    if (inserting || coordMenu.value) event.preventDefault()
+  })
   instance.on('dblclick', onDoubleClick)
   instance.on('zoom', () => (editor.zoom = instance.getZoom()))
   instance.on('move', () => {
@@ -1502,6 +1578,7 @@ onBeforeUnmount(() => {
   cornerMarkers.forEach((marker) => marker.remove())
   cornerMarkers = []
   carLayer = null
+  carLayerTop = null
   map?.remove()
   map = null
   ready = false
@@ -1535,7 +1612,7 @@ watch(() => editor.tool, () => {
   leash = null
   portCursor = null
   hoverPort = null
-  if (map) map.getCanvas().style.cursor = editor.tool === 'select' ? '' : 'crosshair'
+  if (map) map.getCanvas().style.cursor = editor.tool === 'select' ? '' : editor.tool === 'pan' ? 'grab' : 'crosshair'
   scheduleOverlay()
 })
 watch(() => [editor.basemap, editor.customTileUrl], applyBasemap)
@@ -1591,7 +1668,7 @@ function renderTraffic(): void {
 
 watch(() => [traffic.result, traffic.visible], renderTraffic)
 watch(() => editor.selectedLane, () => scheduleOverlay())
-watch(() => editor.identified, () => scheduleOverlay())
+watch(() => editor.turnPreview, () => scheduleOverlay())
 watch(() => ({ ...editor.objectHidden }), () => {
   applyView()
   scheduleOverlay()
@@ -1617,6 +1694,12 @@ defineExpose({ fitToBounds })
 <template>
   <div class="map-wrap">
     <div ref="container" class="map" />
+    <CoordMenu v-if="coordMenu" v-bind="coordMenu" @close="coordMenu = null" />
+    <div v-if="insertMenu" class="insert-menu" role="menu" :style="{ left: `${insertMenu.x}px`, top: `${insertMenu.y}px` }">
+      <button v-if="editor.drawPoints.length > 1" role="menuitem" @click="editor.undoDrawPoint(); insertMenu = null">Отменить последнее действие</button>
+      <button v-if="editor.drawPoints.length > 1" role="menuitem" @click="editor.finishRoad(); insertMenu = null">Завершить отрезок</button>
+      <button role="menuitem" @click="editor.cancelInsert(); insertMenu = null">Отменить вставку полностью</button>
+    </div>
     <div
       v-if="selectionBox"
       class="selection-box"
@@ -1638,6 +1721,27 @@ defineExpose({ fitToBounds })
 .map {
   position: absolute;
   inset: 0;
+}
+.insert-menu {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 210px;
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+}
+.insert-menu button {
+  padding: 4px 8px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+.insert-menu button:hover {
+  background: var(--row-hover);
 }
 .selection-box {
   position: absolute;

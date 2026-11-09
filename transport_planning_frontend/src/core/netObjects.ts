@@ -21,6 +21,7 @@ export type NetObject =
   | 'desiredSpeed'
   | 'reducedSpeed'
   | 'stopSigns'
+  | 'crossings'
   | 'priorityRules'
   | 'signals'
   | 'detectors'
@@ -95,6 +96,8 @@ export function matchesNode(type: NetObject, node: ONode, doc: OsmDoc): boolean 
       return isStopPointTags(tags)
     case 'stopAreas':
       return tags?.public_transport === 'platform'
+    case 'crossings':
+      return tags?.highway === 'crossing'
     case 'stopSigns':
       return tags?.highway === 'stop' || tags?.highway === 'give_way'
     case 'signals':
@@ -113,12 +116,13 @@ export function matchesNode(type: NetObject, node: ONode, doc: OsmDoc): boolean 
 export function matchesWay(type: NetObject, way: OWay): boolean {
   if (type === 'links') return isDrivable(way.tags)
   if (type === 'stopAreas') return way.tags?.public_transport === 'platform'
+  if (type === 'crossings') return way.tags?.footway === 'crossing'
   return false
 }
 
 /** Какие элементы графа выбираются щелчком при этом типе объектов. */
 export function pickTypeOf(type: NetObject): 'auto' | 'links' | 'nodes' {
   if (type === 'links' || type === 'routes' || isCustomObject(type)) return 'links'
-  if (type === 'stopAreas' || type === 'stops') return 'auto'
+  if (type === 'stopAreas' || type === 'stops' || type === 'crossings') return 'auto'
   return 'nodes'
 }

@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   Filter,
+  Footprints,
   Gauge,
   Lock,
   LockOpen,
@@ -68,6 +69,7 @@ const groups: { title: string; rows: Row[] }[] = [
       { id: 'desiredSpeed', label: 'Решения о желаемой скорости', icon: Gauge },
       { id: 'reducedSpeed', label: 'Зоны снижения скорости', icon: CircleSlash },
       { id: 'stopSigns', label: 'Знаки стоп', icon: OctagonX, layers: ['trafficSigns'] },
+      { id: 'crossings', label: 'Пешеходные переходы', icon: Footprints, layers: ['crossings'] },
       { id: 'priorityRules', label: 'Правила приоритета', icon: Signpost },
       { id: 'signals', label: 'Светофоры', icon: TrafficCone, layers: ['signals'] },
       { id: 'detectors', label: 'Детекторы', icon: Activity },
@@ -77,6 +79,7 @@ const groups: { title: string; rows: Row[] }[] = [
 ]
 
 const mapLayers: { key: LayerKey; label: string }[] = [
+  { key: 'markings', label: 'Разметка по ГОСТ вместо линий полос' },
   { key: 'buildings', label: 'Здания' },
   { key: 'landuse', label: 'Территории и вода' },
   { key: 'minor', label: 'Тротуары и тропы' },
@@ -106,7 +109,7 @@ const index = computed<Record<NetObject, Item[]>>(() => {
   if (!doc) return result
 
   for (const node of doc.nodes.values()) {
-    for (const type of ['stopPoints', 'stopAreas', 'stopSigns', 'signals', 'desiredSpeed', 'reducedSpeed', 'priorityRules', 'detectors', 'inflows'] as NetObject[]) {
+    for (const type of ['stopPoints', 'stopAreas', 'stopSigns', 'crossings', 'signals', 'desiredSpeed', 'reducedSpeed', 'priorityRules', 'detectors', 'inflows'] as NetObject[]) {
       if (matchesNode(type, node, doc)) {
         result[type].push({ key: `n${node.id}`, label: node.tags?.name ?? `Узел ${node.id}`, sub: String(node.id), tags: node.tags, select: { kind: 'node', id: node.id }, position: node })
       }

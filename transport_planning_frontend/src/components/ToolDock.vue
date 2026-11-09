@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Circle, Crosshair, Footprints, Landmark, MousePointer2, Route, Scissors, TrafficCone, TrainFrontTunnel, Trash2, Workflow } from 'lucide-vue-next'
+import { Circle, Footprints, Hand, Landmark, MousePointer2, Route, Scissors, TrafficCone, TrainFrontTunnel, Trash2, Workflow } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { type Tool, useEditor } from '@/stores/editor'
@@ -8,15 +8,15 @@ const editor = useEditor()
 
 const tools: { id: Tool; label: string; key: string; icon: typeof Circle; hint: string }[] = [
   { id: 'select', label: 'Выбор', key: 'V', icon: MousePointer2, hint: 'Щелчок выбирает объект активного типа, Shift добавляет к выбору' },
+  { id: 'pan', label: 'Рука', key: 'K', icon: Hand, hint: 'Двигает карту левой кнопкой. Правая кнопка показывает координаты точки' },
   { id: 'road', label: 'Дорога', key: 'D', icon: Route, hint: 'Щелчки ставят точки и прилипают к дорогам. Enter или двойной щелчок завершает' },
   { id: 'node', label: 'Узел', key: 'N', icon: Circle, hint: 'Щелчок по дороге вставляет узел, по пустому месту создаёт отдельный' },
   { id: 'split', label: 'Разрез', key: 'X', icon: Scissors, hint: 'Щелчок по дороге или узлу разрезает дорогу' },
   { id: 'connector', label: 'Поворот', key: 'Q', icon: Workflow, hint: 'Щёлкните красную точку въезда: линия потянется за курсором. Щёлкните голубую точку выезда. Щелчок по пустому месту завершает' },
   { id: 'signal', label: 'Светофор', key: 'T', icon: TrafficCone, hint: 'Щелчок по узлу или дороге ставит или снимает светофор' },
-  { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Щелчок по узлу или дороге ставит или снимает переход' },
+  { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Щёлкните начало перехода, затем его конец: линия должна пересечь дорогу. Щелчок по существующему переходу снимает его' },
   { id: 'bridge', label: 'Мост', key: 'B', icon: Landmark, hint: 'Щелчок по дороге отмечает её как мост' },
   { id: 'tunnel', label: 'Тоннель', key: 'G', icon: TrainFrontTunnel, hint: 'Щелчок по дороге отмечает её как тоннель' },
-  { id: 'identify', label: 'Координаты', key: 'I', icon: Crosshair, hint: 'Щелчок по карте показывает координаты и ссылку на Яндекс Карты' },
 ]
 
 const hint = computed(() => tools.find((tool) => tool.id === editor.tool)?.hint ?? '')

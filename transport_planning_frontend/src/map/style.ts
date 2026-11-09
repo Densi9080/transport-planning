@@ -57,8 +57,8 @@ export const LOS_COLORS = ['#4aa3c7', '#6fc2b0', '#f0c94a', '#ec835a', '#d03b3b'
 /** С этого приближения улица распадается на отдельные полосы. */
 export const LANE_LINE_ZOOM = 16.5
 
-/** Цвета подходов к узлу: север, восток, юг, запад и два запасных для сложных перекрёстков. */
-export const APPROACH_COLORS = ['#38bdf8', '#f59e0b', '#ec4899', '#a3e635', '#a78bfa', '#f8fafc']
+/** Цвета подходов: стандарта на них нет, взята опубликованная палитра Okabe-Ito, различимая при нарушениях цветового зрения. */
+export const APPROACH_COLORS = ['#56B4E9', '#E69F00', '#CC79A7', '#009E73', '#F0E442', '#D55E00']
 
 const APPROACH_COLOR: ExpressionSpecification = [
   'match',
@@ -205,13 +205,22 @@ export function buildLayers(lat: number): LayerSpecification[] {
     } },
     { id: 'markings-lane', type: 'line', source: 'markings', minzoom: 16, maxzoom: LANE_LINE_ZOOM, filter: ['all', ground, ['==', ['get', 'kind'], 'lane']], paint: {
       'line-color': COLORS.marking,
-      'line-width': m(0.16, 0.5),
+      'line-width': m(0.15, 0.5),
       'line-opacity': 0.85,
-      'line-dasharray': [12, 18],
+      // ГОСТ Р 51256: линия 1.5, штрих к разрыву 1:3, при ширине 0,15 м это 3 м и 9 м
+      'line-dasharray': [20, 60],
     } },
     { id: 'markings-lane-solid', type: 'line', source: 'markings', minzoom: 15.5, maxzoom: LANE_LINE_ZOOM, filter: ['all', ground, ['==', ['get', 'kind'], 'lane-solid']], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.18, 0.6),
+    } },
+    { id: 'marking-stop', type: 'line', source: 'markings', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'stop-line'], layout: { visibility: 'none' }, paint: {
+      'line-color': COLORS.marking,
+      'line-width': m(0.4, 1),
+    } },
+    { id: 'marking-zigzag', type: 'line', source: 'markings', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'zigzag'], layout: { visibility: 'none', 'line-join': 'miter' }, paint: {
+      'line-color': '#f5c400',
+      'line-width': m(0.15, 1),
     } },
     { id: 'lane-line', type: 'line', source: 'laneLines', minzoom: LANE_LINE_ZOOM, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': COLORS.laneLine,
@@ -501,6 +510,16 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-color': 'rgba(0,0,0,0)',
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
+    } },
+    { id: 'overlay-turn', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'turn-selected'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': '#ffffff',
+      'line-width': 4,
+    } },
+    { id: 'overlay-turn-end', type: 'circle', source: 'overlay', filter: ['in', ['get', 'role'], ['literal', ['turn-start', 'turn-end']]], paint: {
+      'circle-radius': 7,
+      'circle-color': ['match', ['get', 'role'], 'turn-start', '#22c55e', '#ef4444'],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': '#ffffff',
     } },
     { id: 'overlay-band', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'band'], layout: { 'line-cap': 'round' }, paint: {
       'line-color': '#facc15',

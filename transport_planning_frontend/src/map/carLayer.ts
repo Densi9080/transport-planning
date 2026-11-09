@@ -209,7 +209,7 @@ function speedColor(ratio: number, out: number[]): void {
 }
 
 export class CarLayer implements CustomLayerInterface {
-  readonly id = 'cars'
+  readonly id: string
   readonly type = 'custom' as const
   readonly renderingMode = '3d' as const
 
@@ -227,7 +227,9 @@ export class CarLayer implements CustomLayerInterface {
   private readonly matrix = new Float32Array(16)
   private readonly tint = [0, 0, 0]
 
-  constructor(projector: Projector) {
+  /** Машины одного слоя: те, что под мостом, рисуются раньше моста и им закрываются. */
+  constructor(projector: Projector, id = 'cars', private readonly accepts: (car: Car) => boolean = () => true) {
+    this.id = id
     const origin = MercatorCoordinate.fromLngLat([projector.lon0, projector.lat0])
     const unit = origin.meterInMercatorCoordinateUnits()
     // Метры вокруг центра участка в единицы Меркатора: север в Меркаторе направлен к нулю
@@ -294,7 +296,7 @@ export class CarLayer implements CustomLayerInterface {
     if (!this.program || !this.map || this.cars.length === 0) return
 
     const counts = [0, 0]
-    for (const car of this.cars) counts[car.mesh]!++
+    for (const car of this.cars) if (this.accepts(car)) counts[car.mesh]!++
     this.meshes.forEach((mesh, index) => {
       const needed = counts[index]! * INSTANCE_FLOATS
       if (mesh.data.length < needed) mesh.data = new Float32Array(Math.max(needed * 2, 256 * INSTANCE_FLOATS))
@@ -303,7 +305,7 @@ export class CarLayer implements CustomLayerInterface {
     const cursors = [0, 0]
     const alpha = this.alpha
     for (const car of this.cars) {
-      if (!car.placed) continue
+      if (!car.placed || !this.accepts(car)) continue
       const mesh = this.meshes[car.mesh]!
       const data = mesh.data
       let i = cursors[car.mesh]!

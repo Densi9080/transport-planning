@@ -54,6 +54,16 @@ export class OsmDoc {
     return ++this.lastId
   }
 
+  /** Какой номер получит следующий объект. */
+  peekId(): number {
+    return this.lastId + 1
+  }
+
+  /** Номер, заданный вручную, не должен потом достаться другому объекту. */
+  reserveId(id: number): void {
+    this.lastId = Math.max(this.lastId, id)
+  }
+
   node(id: number): ONode {
     const node = this.nodes.get(id)
     if (!node) throw new Error(`Узел ${id} не найден`)
