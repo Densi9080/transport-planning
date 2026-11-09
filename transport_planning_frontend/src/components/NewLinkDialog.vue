@@ -78,6 +78,8 @@ function submit(): void {
 }
 .box {
   width: min(520px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
   padding: 14px;
   background: var(--panel);
   border: 1px solid var(--line-strong);

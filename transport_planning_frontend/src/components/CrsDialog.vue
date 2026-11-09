@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronRight, Plus, Trash2, X } from 'lucide-vue-next'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { checkCrsDefinition, formatPosition, resolveCrs } from '@/core/crs'
 import { CRS_CATALOG, CRS_GROUPS, type CrsEntry, WGS84_ID } from '@/core/crsCatalog'
@@ -17,6 +17,10 @@ const collapsed = ref<Record<string, boolean>>({})
 const draftName = ref('')
 const draftDef = ref('')
 const draftResult = ref<{ ok: boolean; text: string } | null>(null)
+const backdrop = ref<HTMLElement | null>(null)
+
+// Фокус внутри окна нужен, чтобы Esc закрывал его сразу после открытия
+onMounted(() => backdrop.value?.focus())
 
 const samplePoint = computed(() => editor.cursor ?? (editor.camera ? { lat: editor.camera.center[1], lon: editor.camera.center[0] } : { lat: 52.26, lon: 104.26 }))
 const current = computed(() => resolveCrs(chosen.value))
@@ -75,7 +79,7 @@ function apply(): void {
 </script>
 
 <template>
-  <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="crs-title" @keydown.esc="editor.crsDialogOpen = false">
+  <div ref="backdrop" class="backdrop" role="dialog" aria-modal="true" aria-labelledby="crs-title" tabindex="-1" @keydown.esc="editor.crsDialogOpen = false" @click.self="editor.crsDialogOpen = false">
     <div class="box">
       <header>
         <h2 id="crs-title">Выбор системы координат</h2>
@@ -162,12 +166,14 @@ function apply(): void {
   place-items: center;
   padding: 16px;
   background: rgba(0, 0, 0, 0.45);
+  outline: none;
 }
 .box {
   display: flex;
   flex-direction: column;
   width: min(680px, 100%);
-  height: min(680px, 100%);
+  /* Высота в единицах экрана: проценты не ограничивают строку сетки, и длинный список уводил окно за край */
+  height: min(680px, calc(100vh - 32px));
   padding: 12px;
   background: var(--panel);
   border: 1px solid var(--line-strong);
