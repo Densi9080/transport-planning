@@ -547,10 +547,24 @@ function renderOverlay(): void {
       if (!bounds.contains([position.lon, position.lat])) continue
       const source = editor.connectorFrom
       const isSource = !!source && port.incoming && source.node === port.node && source.neighbor === port.neighbor && source.lane === port.lane
-      features.push(pointOf(position, { role: isSource ? 'port-source' : port.incoming ? 'port-in' : 'port-out' }))
+      const isLinked = !port.incoming && !!connector?.links.some((link) => port.node === editor.connectorFrom?.node && link.neighbor === port.neighbor && link.lane === port.lane)
+      const role = isSource ? 'port-source' : port === hoverPort ? 'port-target' : isLinked ? 'port-linked' : port.incoming ? 'port-in' : 'port-out'
+      features.push(pointOf(position, { role }))
     }
     const anchor = editor.connectorFrom?.port
-    if (portDragging && anchor && portCursor) features.push(lineOf([anchor, portCursor], { role: 'draw' }))
+    if (anchor) {
+      // Уже проведённые связи видны паутиной от исходной полосы, пока она выбрана
+      for (const link of connector?.links ?? []) {
+        const target = editor.connectorPorts.find((port) => !port.incoming && port.node === editor.connectorFrom?.node && port.neighbor === link.neighbor && port.lane === link.lane)
+        if (target) features.push(lineOf([anchor, target.point], { role: 'band' }))
+      }
+      const end = hoverPort?.point ?? portCursor
+      if (end) features.push(lineOf([anchor, end], { role: 'band' }))
+    }
+  }
+  if (leash) {
+    if (leash.target) features.push(lineOf([leash.cursor, leash.target], { role: 'band' }))
+    features.push(pointOf(projector.toLatLon(leash.target ?? leash.cursor), { role: 'ghost' }))
   }
 
   setData('overlay', { type: 'FeatureCollection', features })
@@ -640,10 +654,13 @@ function onMouseMove(event: MapMouseEvent): void {
 
   editor.cursor = { lat: event.lngLat.lat, lon: event.lngLat.lng }
 
-  if (portDragging) {
-    portMoved = true
+  if (editor.tool === 'connector') {
+    if (portDragging) portMoved = true
     portCursor = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
-    map!.getCanvas().style.cursor = 'grabbing'
+    const port = portAt(event.lngLat)
+    const source = editor.connectorFrom
+    hoverPort = port && (source ? !port.incoming && port.node === source.node && port.neighbor !== source.neighbor : port.incoming) ? port : null
+    map!.getCanvas().style.cursor = hoverPort ? 'pointer' : 'crosshair'
     scheduleOverlay()
     return
   }
@@ -651,6 +668,7 @@ function onMouseMove(event: MapMouseEvent): void {
   if (editor.tool === 'road') {
     cursorSnap = original.altKey ? null : findSnap(event.lngLat, null, true)
     cursorPosition = cursorSnap?.position ?? constrained(event.lngLat, original.shiftKey)
+    leash = editor.drawPoints.length === 0 ? { cursor: editor.projector!.toXY(cursorPosition), target: null } : null
     hover = null
     map!.getCanvas().style.cursor = 'crosshair'
     scheduleOverlay()
@@ -660,6 +678,9 @@ function onMouseMove(event: MapMouseEvent): void {
   const next = pick(event.lngLat)
   const changed = JSON.stringify(next) !== JSON.stringify(hover)
   hover = next
+  const hadLeash = !!leash
+  updateLeash(event.lngLat, next)
+  if (leash || hadLeash) scheduleOverlay()
   const canvas = map!.getCanvas()
   if (editor.tool === 'select' && editor.mode !== 'select') canvas.style.cursor = next ? (next.kind === 'way' ? 'pointer' : 'move') : ''
   else canvas.style.cursor = 'crosshair'
@@ -675,11 +696,31 @@ function scheduleOverlay(): void {
   })
 }
 
-const PORT_MIN_ZOOM = 17.5
+const PORT_MIN_ZOOM = 17
+const LEASH_TOOLS = new Set<string>(['object', 'stopPoint', 'stopArea', 'stopGroup', 'signal', 'sign', 'crossing', 'node', 'bump', 'lineStop'])
 const PORT_PICK_PX = 12
 let portDragging = false
 let portMoved = false
 let portCursor: XY | null = null
+let hoverPort: LanePort | null = null
+/** Поводок вставки: от курсора к месту, куда встанет объект. */
+let leash: { cursor: XY; target: XY | null } | null = null
+
+function updateLeash(lngLat: LngLat, hit: Hit | null): void {
+  if (!LEASH_TOOLS.has(editor.tool) || editor.viewMode === 'sim') {
+    leash = null
+    return
+  }
+  const projector = editor.projector!
+  const cursor = projector.toXY({ lat: lngLat.lat, lon: lngLat.lng })
+  let target: XY | null = null
+  if (hit?.kind === 'way') target = (hit as HitWay).point
+  else if (hit?.kind === 'node') {
+    const node = editor.doc!.nodes.get(hit.id)
+    if (node) target = projector.toXY(node)
+  }
+  leash = { cursor, target }
+}
 
 function portAt(lngLat: LngLat): LanePort | null {
   if (!map || map.getZoom() < PORT_MIN_ZOOM) return null
@@ -899,6 +940,7 @@ function onClick(event: MapMouseEvent): void {
     case 'connector': {
       const port = portAt(event.lngLat)
       if (port) editor.finishConnectorAtPort(port)
+      else if (editor.connectorFrom?.port) editor.connectorFrom = null
       else editor.pickConnectorLane(editor.projector!.toXY(position))
       scheduleOverlay()
       break
@@ -1426,10 +1468,17 @@ watch(() => editor.proposalTargets, scheduleOverlay)
 watch(() => [editor.issues, editor.focusedIssue], renderIssues)
 watch(() => editor.drawPoints, scheduleOverlay)
 watch(() => ({ ...editor.layers }), applyView)
+watch(() => editor.connectorFrom, () => {
+  if (!editor.connectorFrom) hoverPort = null
+  scheduleOverlay()
+})
 watch(() => editor.tool, () => {
   hover = null
   cursorSnap = null
   cursorPosition = null
+  leash = null
+  portCursor = null
+  hoverPort = null
   if (map) map.getCanvas().style.cursor = editor.tool === 'select' ? '' : 'crosshair'
   scheduleOverlay()
 })

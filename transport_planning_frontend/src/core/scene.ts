@@ -439,6 +439,28 @@ export function junctionConnectors(
   return connectors
 }
 
+/**
+ * Номер цвета для каждого подхода к узлу. Север, восток, юг и запад всегда одного цвета по всему городу,
+ * а если два подхода попали в одну сторону, второй получает ближайший свободный цвет.
+ */
+export function approachSlots(arms: Arm[]): Map<Arm, number> {
+  const slots = new Map<Arm, number>()
+  const used = new Set<number>()
+  const order = arms
+    .map((arm) => {
+      const angle = bearing(arm.dir)
+      const quadrant = Math.round(angle / 90) % 4
+      return { arm, quadrant, skew: Math.abs(((angle - quadrant * 90 + 540) % 360) - 180) }
+    })
+    .sort((a, b) => a.skew - b.skew)
+  for (const { arm, quadrant } of order) {
+    const free = [quadrant, (quadrant + 1) % 4, (quadrant + 3) % 4, (quadrant + 2) % 4, 4, 5].find((slot) => !used.has(slot)) ?? 5
+    used.add(free)
+    slots.set(arm, free)
+  }
+  return slots
+}
+
 /** Геометрия концов всех участков: сколько обрезано и как стыкуются. */
 export function computeArmGeometries(network: Network): Map<Arm, ArmGeometry> {
   const geometries = new Map<Arm, ArmGeometry>()
@@ -640,8 +662,9 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       )
     }
     if (arms.length >= 3) {
+      const approaches = approachSlots(arms)
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
-        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node }))
+        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0 }))
       }
     }
     if (arms.length !== 2 || !isSeamless(arms)) {

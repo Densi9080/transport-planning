@@ -11,7 +11,7 @@ const tools: { id: Tool; label: string; key: string; icon: typeof Circle; hint: 
   { id: 'road', label: 'Дорога', key: 'D', icon: Route, hint: 'Щелчки ставят точки и прилипают к дорогам. Enter или двойной щелчок завершает' },
   { id: 'node', label: 'Узел', key: 'N', icon: Circle, hint: 'Щелчок по дороге вставляет узел, по пустому месту создаёт отдельный' },
   { id: 'split', label: 'Разрез', key: 'X', icon: Scissors, hint: 'Щелчок по дороге или узлу разрезает дорогу' },
-  { id: 'connector', label: 'Поворот', key: 'Q', icon: Workflow, hint: 'Потяните от конца полосы к началу другой полосы' },
+  { id: 'connector', label: 'Поворот', key: 'Q', icon: Workflow, hint: 'Щёлкните красную точку въезда: линия потянется за курсором. Щёлкните голубую точку выезда. Щелчок по пустому месту завершает' },
   { id: 'signal', label: 'Светофор', key: 'T', icon: TrafficCone, hint: 'Щелчок по узлу или дороге ставит или снимает светофор' },
   { id: 'crossing', label: 'Переход', key: 'C', icon: Footprints, hint: 'Щелчок по узлу или дороге ставит или снимает переход' },
   { id: 'bridge', label: 'Мост', key: 'B', icon: Landmark, hint: 'Щелчок по дороге отмечает её как мост' },

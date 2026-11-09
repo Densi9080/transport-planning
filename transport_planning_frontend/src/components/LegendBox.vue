@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { COLORS, LOS_COLORS } from '@/map/style'
+import { APPROACH_COLORS, LOS_COLORS } from '@/map/style'
 import { LOS_LABELS, LOS_TITLES } from '@/sim/macro'
 import { LOS_SPEED_THRESHOLDS } from '@/sim/micro'
 import { DRIVER_STYLES, STYLE_LABELS } from '@/sim/micro'
@@ -47,9 +47,10 @@ const STYLE_COLORS = { calm: '#4aa3c7', normal: '#9ea3ad', aggressive: '#db332e'
     </template>
   </div>
   <div v-else-if="editor.viewMode === 'engineering' && editor.layers.turnPaths" class="legend compact" aria-label="Легенда">
-    <span class="short"><i :style="{ background: COLORS.through }" /> Прямо</span>
-    <span class="short"><i :style="{ background: COLORS.left }" /> Налево</span>
-    <span class="short"><i :style="{ background: COLORS.right }" /> Направо</span>
+    <span class="short"><i :style="{ background: APPROACH_COLORS[0] }" /> С севера</span>
+    <span class="short"><i :style="{ background: APPROACH_COLORS[1] }" /> С востока</span>
+    <span class="short"><i :style="{ background: APPROACH_COLORS[2] }" /> С юга</span>
+    <span class="short"><i :style="{ background: APPROACH_COLORS[3] }" /> С запада</span>
   </div>
 </template>
 

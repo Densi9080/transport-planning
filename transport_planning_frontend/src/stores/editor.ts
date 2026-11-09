@@ -984,6 +984,7 @@ export const useEditor = defineStore('editor', () => {
       source: from.points,
       targets,
       connected: connectors.filter((c) => c.from.neighbor === from.neighbor && c.fromLane === from.lane).map((c) => c.points),
+      links: connectors.filter((c) => c.from.neighbor === from.neighbor && c.fromLane === from.lane).map((c) => ({ neighbor: c.to.neighbor, lane: c.toLane })),
     }
   })
 

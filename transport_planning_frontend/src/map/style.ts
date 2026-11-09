@@ -56,6 +56,20 @@ export const LOS_COLORS = ['#4aa3c7', '#6fc2b0', '#f0c94a', '#ec835a', '#d03b3b'
 /** С этого приближения улица распадается на отдельные полосы. */
 export const LANE_LINE_ZOOM = 16.5
 
+/** Цвета подходов к узлу: север, восток, юг, запад и два запасных для сложных перекрёстков. */
+export const APPROACH_COLORS = ['#38bdf8', '#f59e0b', '#ec4899', '#a3e635', '#a78bfa', '#f8fafc']
+
+const APPROACH_COLOR: ExpressionSpecification = [
+  'match',
+  ['get', 'approach'],
+  0, APPROACH_COLORS[0]!,
+  1, APPROACH_COLORS[1]!,
+  2, APPROACH_COLORS[2]!,
+  3, APPROACH_COLORS[3]!,
+  4, APPROACH_COLORS[4]!,
+  APPROACH_COLORS[5]!,
+]
+
 export const COLORS = {
   background: '#141518',
   building: '#37383c',
@@ -212,12 +226,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-ignore-placement': true,
     } },
     { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, paint: {
-      'line-color': ['match', ['get', 'turn'], 'left', COLORS.left, 'right', COLORS.right, COLORS.through],
+      'line-color': APPROACH_COLOR,
       'line-width': m(3, 1.5),
       'line-opacity': 0.22,
     } },
     { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, paint: {
-      'line-color': ['match', ['get', 'turn'], 'left', COLORS.left, 'right', COLORS.right, COLORS.through],
+      'line-color': APPROACH_COLOR,
       'line-width': m(0.3, 0.8),
       'line-opacity': 0.9,
     } },
@@ -463,11 +477,21 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
     } },
-    { id: 'overlay-port', type: 'circle', source: 'overlay', filter: ['in', ['get', 'role'], ['literal', ['port-in', 'port-out', 'port-source']]], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 17.5, ['case', ['==', ['get', 'role'], 'port-source'], 5, 3], 20, ['case', ['==', ['get', 'role'], 'port-source'], 9, 7]],
-      'circle-color': ['match', ['get', 'role'], 'port-source', '#f59e0b', '#14171c'],
+    { id: 'overlay-band', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'band'], layout: { 'line-cap': 'round' }, paint: {
+      'line-color': '#facc15',
+      'line-width': 2,
+    } },
+    { id: 'overlay-ghost', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'ghost'], paint: {
+      'circle-radius': 7,
+      'circle-color': 'rgba(250,204,21,0.25)',
       'circle-stroke-width': 2,
-      'circle-stroke-color': ['match', ['get', 'role'], 'port-in', '#ef4444', 'port-out', '#22d3ee', '#ffffff'],
+      'circle-stroke-color': '#facc15',
+    } },
+    { id: 'overlay-port', type: 'circle', source: 'overlay', filter: ['in', ['get', 'role'], ['literal', ['port-in', 'port-out', 'port-source', 'port-target', 'port-linked']]], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 17, ['match', ['get', 'role'], 'port-source', 5, 'port-target', 7, 3], 20, ['match', ['get', 'role'], 'port-source', 9, 'port-target', 12, 7]],
+      'circle-color': ['match', ['get', 'role'], 'port-source', '#f59e0b', 'port-target', 'rgba(74,222,128,0.25)', '#14171c'],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': ['match', ['get', 'role'], 'port-in', '#ef4444', 'port-out', '#22d3ee', 'port-target', '#4ade80', 'port-linked', '#facc15', '#ffffff'],
     } },
     { id: 'overlay-mid', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'mid'], paint: {
       'circle-radius': 3.5,
