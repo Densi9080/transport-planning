@@ -11,6 +11,7 @@ import { useEditor } from '@/stores/editor'
 
 import LaneEditor from './LaneEditor.vue'
 import ProfileCards from './ProfileCards.vue'
+import StatCounter from './StatCounter.vue'
 import TagTable from './TagTable.vue'
 
 const props = defineProps<{ way: OWay }>()
@@ -46,6 +47,10 @@ const heights = computed(() => {
   }
 })
 const parallelGap = ref(12)
+const MAX_LANES = 10
+const SPEED_STEP = 5
+const MAX_SPEED = 130
+const DEFAULT_SPEED = 60
 const showProfiles = ref(false)
 const activePreset = computed(() => matchingPreset(tags.value)?.id)
 
@@ -130,17 +135,19 @@ function setOneway(oneway: boolean): void {
   }
 }
 
-function changeLanes(direction: 'forward' | 'backward', delta: number): void {
+function setLanes(direction: 'forward' | 'backward', value: number | null): void {
+  if (value === null) return
   const p = profile.value
   if (p.oneway) {
     const reversed = p.forward === 0
-    const lanes = Math.max(1, p.forward + p.backward + delta)
-    update(withLanes(tags.value, reversed ? 0 : lanes, reversed ? lanes : 0), 'Число полос')
+    update(withLanes(tags.value, reversed ? 0 : value, reversed ? value : 0), 'Число полос')
   } else {
-    const forward = direction === 'forward' ? Math.max(1, p.forward + delta) : p.forward
-    const backward = direction === 'backward' ? Math.max(1, p.backward + delta) : p.backward
-    update(withLanes(tags.value, forward, backward), 'Число полос')
+    update(withLanes(tags.value, direction === 'forward' ? value : p.forward, direction === 'backward' ? value : p.backward), 'Число полос')
   }
+}
+
+function setSpeed(value: number | null): void {
+  setTag('maxspeed', value === null ? '' : String(value), 'Скорость')
 }
 
 function setStructure(kind: 'none' | 'bridge' | 'tunnel'): void {
@@ -172,22 +179,33 @@ function changeLayer(delta: number): void {
       <span class="faint id">#{{ way.id }}</span>
     </div>
     <div v-if="isRoad" class="hero">
+      <StatCounter
+        :label="profile.oneway ? 'Полос' : 'Полос по ходу'"
+        :value="String(profile.oneway ? profile.forward + profile.backward : profile.forward)"
+        :max="MAX_LANES"
+        @change="setLanes('forward', $event)"
+      />
+      <StatCounter v-if="!profile.oneway" label="Полос встречных" :value="String(profile.backward)" :max="MAX_LANES" @change="setLanes('backward', $event)" />
       <div class="stat">
-        <span class="eyebrow">Полос</span>
-        <strong>{{ profile.oneway ? profile.forward + profile.backward : `${profile.forward} + ${profile.backward}` }}</strong>
-      </div>
-      <div class="stat">
-        <span class="eyebrow">Ширина</span>
+        <span class="eyebrow">Ширина проезжей части</span>
         <strong>{{ totalWidth(profile).toFixed(1) }}<small> м</small></strong>
-      </div>
-      <div class="stat">
-        <span class="eyebrow">Скорость</span>
-        <strong>{{ tags.maxspeed ?? '—' }}<small v-if="tags.maxspeed && /^\d+$/.test(tags.maxspeed)"> км/ч</small></strong>
       </div>
       <div class="stat">
         <span class="eyebrow">Длина</span>
         <strong>{{ lengthM.toFixed(0) }}<small> м</small></strong>
       </div>
+      <StatCounter
+        :class="{ wide: !profile.oneway }"
+        label="Разрешённая скорость"
+        :value="tags.maxspeed ?? ''"
+        unit="км/ч"
+        :step="SPEED_STEP"
+        :min="SPEED_STEP"
+        :max="MAX_SPEED"
+        :start="DEFAULT_SPEED"
+        clearable
+        @change="setSpeed"
+      />
     </div>
     <p v-if="profile.inferred && isRoad" class="hint">Полос нет в файле: показано значение по умолчанию.</p>
   </div>
@@ -232,33 +250,9 @@ function changeLayer(delta: number): void {
         <ArrowLeftRight :size="13" aria-hidden="true" />
         {{ profile.oneway ? 'Развернуть движение' : 'Развернуть порядок узлов' }} <kbd>F</kbd>
       </button>
-      <div class="grid-2">
-        <div class="field">
-          <label>{{ profile.oneway ? 'Полос' : 'По ходу' }}</label>
-          <div class="stepper">
-            <button aria-label="Меньше полос" @click="changeLanes('forward', -1)"><Minus :size="13" /></button>
-            <span>{{ profile.oneway ? profile.forward + profile.backward : profile.forward }}</span>
-            <button aria-label="Больше полос" @click="changeLanes('forward', 1)"><Plus :size="13" /></button>
-          </div>
-        </div>
-        <div v-if="!profile.oneway" class="field">
-          <label>Встречных</label>
-          <div class="stepper">
-            <button aria-label="Меньше встречных полос" @click="changeLanes('backward', -1)"><Minus :size="13" /></button>
-            <span>{{ profile.backward }}</span>
-            <button aria-label="Больше встречных полос" @click="changeLanes('backward', 1)"><Plus :size="13" /></button>
-          </div>
-        </div>
-      </div>
-      <div class="grid-2">
-        <div class="field">
-          <label for="way-speed">Скорость, км/ч</label>
-          <input id="way-speed" class="input" :value="tags.maxspeed ?? ''" @change="setTag('maxspeed', ($event.target as HTMLInputElement).value, 'Скорость')" />
-        </div>
-        <div class="field">
-          <label for="way-width">Ширина, м</label>
-          <input id="way-width" class="input" :value="tags.width ?? ''" placeholder="авто" @change="setTag('width', ($event.target as HTMLInputElement).value, 'Ширина')" />
-        </div>
+      <div class="field">
+        <label for="way-width">Ширина, м</label>
+        <input id="way-width" class="input" :value="tags.width ?? ''" placeholder="авто" @change="setTag('width', ($event.target as HTMLInputElement).value, 'Ширина')" />
       </div>
     </div>
 
@@ -359,6 +353,9 @@ h2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
+}
+.hero .wide {
+  grid-column: 1 / -1;
 }
 .stat {
   display: flex;
