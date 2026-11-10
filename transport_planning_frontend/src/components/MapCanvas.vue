@@ -642,9 +642,17 @@ function renderOverlay(): void {
   if (map.getPitch() > PITCH_3D) guarded('объёмная подсветка', () => renderSelected3d(features, doc, projector))
   const turnView = editor.turnPreview
   if (turnView) {
-    for (const path of turnView.paths) features.push(lineOf(path, { role: 'turn-selected' }))
-    features.push(pointOf(projector.toLatLon(turnView.start), { role: 'turn-start' }))
-    features.push(pointOf(projector.toLatLon(turnView.end), { role: 'turn-end' }))
+    // Неактивные полосы рисуются первыми, чтобы выбранная полоса лежала сверху
+    const ordered = [...turnView.lanes].sort((a, b) => Number(a.active) - Number(b.active))
+    const starts = new Map<number, { point: XY; active: boolean }>()
+    const ends = new Map<number, { point: XY; active: boolean }>()
+    for (const lane of ordered) {
+      features.push(lineOf(lane.points, { role: 'turn-selected', active: lane.active }))
+      starts.set(lane.fromLane, { point: lane.points[0]!, active: (starts.get(lane.fromLane)?.active ?? false) || lane.active })
+      ends.set(lane.toLane, { point: lane.points.at(-1)!, active: (ends.get(lane.toLane)?.active ?? false) || lane.active })
+    }
+    for (const item of starts.values()) features.push(pointOf(projector.toLatLon(item.point), { role: 'turn-start', active: item.active }))
+    for (const item of ends.values()) features.push(pointOf(projector.toLatLon(item.point), { role: 'turn-end', active: item.active }))
   }
   if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
   for (const sign of editor.signPreview) {
@@ -1118,6 +1126,27 @@ function onMouseUp(event: MapMouseEvent): void {
   editor.touch()
 }
 
+/**
+ * Из линий под курсором — ближайшая на экране. Траектории манёвров в узле лежат плотно и пересекаются,
+ * поэтому первая найденная часто оказывается соседней, а не той, по которой щёлкнули.
+ */
+function nearestFeature<T extends { geometry: { type: string; coordinates?: unknown } }>(features: T[], point: { x: number; y: number }): T | undefined {
+  let best: T | undefined
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const feature of features) {
+    if (feature.geometry.type !== 'LineString') continue
+    const screen = (feature.geometry.coordinates as [number, number][]).map((c) => map!.project(c))
+    for (let i = 1; i < screen.length; i++) {
+      const hit = nearestOnSegment(point, screen[i - 1]!, screen[i]!)
+      if (hit.distance < bestDistance) {
+        bestDistance = hit.distance
+        best = feature
+      }
+    }
+  }
+  return best ?? features[0]
+}
+
 function onClick(event: MapMouseEvent): void {
   if (suppressClick) return
   if (editor.mode === 'select' && editor.selectShape === 'polygon' && editor.viewMode !== 'sim') {
@@ -1178,10 +1207,15 @@ function onClick(event: MapMouseEvent): void {
       }
       if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
         const { x, y } = event.point
-        const turn = map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] })[0]
-        const props = turn?.properties as { node?: number; from?: number; to?: number } | undefined
+        const turn = nearestFeature(
+          map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] }),
+          event.point,
+        )
+        const props = turn?.properties as { node?: number; from?: number; to?: number; fromLane?: number } | undefined
         if (props?.node !== undefined && props.from !== undefined && props.to !== undefined) {
-          editor.selectTurn(props.node, props.from, props.to)
+          // Повторный щелчок по тому же манёвру выбирает одну его полосу
+          const same = editor.selectedTurn?.node === props.node && editor.selectedTurn.from === props.from && editor.selectedTurn.to === props.to
+          editor.selectTurn(props.node, props.from, props.to, same ? (props.fromLane ?? null) : null)
           return
         }
       }

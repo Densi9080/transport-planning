@@ -770,7 +770,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     if (arms.length >= 3) {
       const approaches = approachSlots(arms)
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
-        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor }))
+        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor, fromLane: connector.fromLane }))
       }
     } else if (arms.length === 2 && !isSeamless(arms)) {
       // Стык двух отрезков с разным сечением: без соединений полосы обрывались бы у площадки узла

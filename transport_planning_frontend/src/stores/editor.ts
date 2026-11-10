@@ -26,7 +26,7 @@ import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
 import { type CrsId, normalizeCrs, setCustomCrs } from '@/core/crs'
 import type { CrsEntry } from '@/core/crsCatalog'
 import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lanePorts, laneStubNearNode } from '@/core/lanePick'
-import { nodeConnectors, resetLaneConnections, setLaneConnection } from '@/core/laneOps'
+import { nodeConnectors, resetLaneConnections, setLaneConnection, setMovementLanes } from '@/core/laneOps'
 import { type TurnAttrs, writeTurnAttrs } from '@/core/turnAttrs'
 import { laneOffsets, parseProfile, totalWidth, withLanes } from '@/core/lanes'
 import { buildNetwork, junctionMovements } from '@/core/topology'
@@ -242,7 +242,8 @@ export const useEditor = defineStore('editor', () => {
   const deleteRequest = shallowRef<{ items: SelectedItem[]; label: string } | null>(null)
   const pendingRoad = shallowRef<{ points: DrawPoint[] } | null>(null)
   const crossingStart = shallowRef<LatLon | null>(null)
-  const selectedTurn = shallowRef<{ node: number; from: number; to: number } | null>(null)
+  /** Выбранный манёвр. fromLane — индекс полосы въезда слева направо, если выбрана одна полоса. */
+  const selectedTurn = shallowRef<{ node: number; from: number; to: number; fromLane: number | null } | null>(null)
   const objectFilter = reactive<Partial<Record<NetObject, ObjectFilter>>>({})
   /** Куда пользователь хотел перейти, пока не решил судьбу несохранённых правок. */
   const leaveRequest = ref<EditMode | 'sim' | null>(null)
@@ -791,9 +792,9 @@ export const useEditor = defineStore('editor', () => {
     selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, count: hit.count, points: lanePolyline(hit) } : null
   }
 
-  function selectTurn(node: number, from: number, to: number): void {
+  function selectTurn(node: number, from: number, to: number, fromLane: number | null = null): void {
     selection.value = [{ kind: 'node', id: node }]
-    selectedTurn.value = { node, from, to }
+    selectedTurn.value = { node, from, to, fromLane }
     inspectorOpen.value = true
   }
 
@@ -807,7 +808,10 @@ export const useEditor = defineStore('editor', () => {
     return junctionMovements(d, net, turn.node).filter((item) => item.from.neighbor === turn.from)
   })
 
-  /** Что подсветить на карте: откуда и куда ведёт выбранный поворот. */
+  /**
+   * Что подсветить на карте: манёвр по полосам, как в Visum. У каждой полосы въезда своя точка начала,
+   * у каждой полосы выезда своя точка конца, поэтому три полосы прямо дают шесть точек.
+   */
   const turnPreview = computed(() => {
     void rev.value
     const turn = selectedTurn.value
@@ -818,24 +822,50 @@ export const useEditor = defineStore('editor', () => {
     const from = d.nodes.get(turn.from)
     const to = d.nodes.get(turn.to)
     if (!via || !from || !to) return null
-    const center = p.toXY(via)
-    const paths = nodeConnectors(d, p, turn.node).connectors.filter((c) => c.from.neighbor === turn.from && c.to.neighbor === turn.to).map((c) => c.points)
-    const toward = (target: XY): XY => {
-      const dx = target.x - center.x
-      const dy = target.y - center.y
-      const length = Math.hypot(dx, dy) || 1
-      const reach = Math.min(TURN_MARK_M, length)
-      return { x: center.x + (dx / length) * reach, y: center.y + (dy / length) * reach }
+    const connectors = nodeConnectors(d, p, turn.node).connectors.filter((c) => c.from.neighbor === turn.from && c.to.neighbor === turn.to)
+    if (connectors.length === 0) {
+      // Манёвр запрещён или полос нет: показываем направление схематично
+      const center = p.toXY(via)
+      const toward = (target: XY): XY => {
+        const dx = target.x - center.x
+        const dy = target.y - center.y
+        const length = Math.hypot(dx, dy) || 1
+        const reach = Math.min(TURN_MARK_M, length)
+        return { x: center.x + (dx / length) * reach, y: center.y + (dy / length) * reach }
+      }
+      const start = toward(p.toXY(from))
+      const end = toward(p.toXY(to))
+      return { lanes: [{ fromLane: -1, toLane: -1, points: [start, center, end], active: true }], lanesIn: 0, lanesOut: 0 }
     }
-    const start = paths[0]?.[0] ?? toward(p.toXY(from))
-    const end = paths[0]?.at(-1) ?? toward(p.toXY(to))
-    return { paths: paths.length ? paths : [[start, center, end]], start, end }
+    const lanes = connectors.map((c) => ({
+      fromLane: c.fromLane,
+      toLane: c.toLane,
+      points: c.points,
+      active: turn.fromLane === null || turn.fromLane === c.fromLane,
+    }))
+    return { lanes, lanesIn: connectors[0]!.from.lanesIn, lanesOut: connectors[0]!.to.lanesOut }
   })
 
   function setTurnAllowed(toNeighbor: number, allowed: boolean): void {
     const turn = selectedTurn.value
     if (!turn) return
-    mutate(allowed ? 'Поворот разрешён' : 'Поворот запрещён', (d, p) => setMovementAllowed(d, p, turn.node, turn.from, toNeighbor, allowed))
+    mutate(allowed ? 'Поворот разрешён' : 'Поворот запрещён', (d, p) => setMovementLanes(d, p, turn.node, turn.from, toNeighbor, allowed))
+  }
+
+  /** Соединения полос выбранного подхода: те же, что в редакторе узла и на карте. */
+  const turnConnectors = computed(() => {
+    void rev.value
+    const turn = selectedTurn.value
+    const d = doc.value
+    const p = projector.value
+    if (!turn || !d || !p) return []
+    return nodeConnectors(d, p, turn.node).connectors.filter((c) => c.from.neighbor === turn.from)
+  })
+
+  function setTurnLane(fromLane: number, toLane: number, enabled: boolean): void {
+    const turn = selectedTurn.value
+    if (!turn) return
+    mutate(enabled ? 'Соединение полос' : 'Снято соединение полос', (d, p) => setLaneConnection(d, p, turn.node, turn.from, fromLane, turn.to, toLane, enabled))
   }
 
   function applyTurnTemplate(template: 'noLeft' | 'noRight' | 'onlyStraight' | 'noUturn' | 'all'): void {
@@ -851,7 +881,7 @@ export const useEditor = defineStore('editor', () => {
       return { to: item.to.neighbor, allowed, changed: allowed !== item.allowed }
     })
     mutate('Шаблон запретов поворотов', (d, p) => {
-      for (const item of plan) if (item.changed) setMovementAllowed(d, p, turn.node, turn.from, item.to, item.allowed)
+      for (const item of plan) if (item.changed) setMovementLanes(d, p, turn.node, turn.from, item.to, item.allowed)
     })
   }
 
@@ -1553,6 +1583,8 @@ export const useEditor = defineStore('editor', () => {
     selectTurn,
     turnMovements,
     turnPreview,
+    turnConnectors,
+    setTurnLane,
     setTurnAllowed,
     applyTurnTemplate,
     updateTurnAttrs,

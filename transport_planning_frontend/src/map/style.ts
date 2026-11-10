@@ -545,15 +545,19 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
     } },
+    // Манёвр по полосам: у каждой полосы своя траектория, точка начала (зелёная) и конца (красная)
     { id: 'overlay-turn', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'turn-selected'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': '#ffffff',
-      'line-width': 4,
+      'line-width': ['case', ['get', 'active'], 3.5, 2],
+      'line-opacity': ['case', ['get', 'active'], 1, 0.35],
     } },
     { id: 'overlay-turn-end', type: 'circle', source: 'overlay', filter: ['in', ['get', 'role'], ['literal', ['turn-start', 'turn-end']]], paint: {
-      'circle-radius': 7,
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 16, ['case', ['get', 'active'], 4, 3], 20, ['case', ['get', 'active'], 7, 5]],
       'circle-color': ['match', ['get', 'role'], 'turn-start', '#22c55e', '#ef4444'],
-      'circle-stroke-width': 2,
+      'circle-opacity': ['case', ['get', 'active'], 1, 0.4],
+      'circle-stroke-width': 1.5,
       'circle-stroke-color': '#ffffff',
+      'circle-stroke-opacity': ['case', ['get', 'active'], 1, 0.4],
     } },
     { id: 'overlay-select-fill', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'select-area'], paint: {
       'fill-color': 'rgba(56,189,248,0.14)',

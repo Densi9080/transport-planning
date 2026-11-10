@@ -4,7 +4,7 @@ import { isOneway, withTurns } from './lanes'
 import { ensureEndsAtVia, setMovementAllowed } from './ops'
 import { computeArmGeometries, type Connector, junctionConnectors } from './scene'
 import { SIGNAL_PLAN_TAG, type SignalPlan, serializeSignalPlan } from './signals'
-import { type Arm, buildNetwork, connectivityAt, formatConnectivity, type TurnKind } from './topology'
+import { type Arm, buildNetwork, connectivityAt, formatConnectivity, type TurnKind, turnKind } from './topology'
 import type { Tags } from './types'
 
 /**
@@ -87,6 +87,44 @@ export function setLaneConnection(
     })
   }
   syncTurnLanes(doc, projector, node, fromNeighbor)
+}
+
+/**
+ * Включает или выключает манёвр целиком так же, как редактор узла: через соединения полос.
+ * Выключение снимает все его соединения (остаётся запрет поворота), включение снимает запрет,
+ * а если разметка полос всё равно не даёт ни одной полосы — соединяет полосы по ПДД:
+ * налево и в разворот с крайней левой, направо с крайней правой, прямо со всех.
+ */
+export function setMovementLanes(
+  doc: OsmDoc,
+  projector: Projector,
+  node: number,
+  fromNeighbor: number,
+  toNeighbor: number,
+  allowed: boolean,
+): void {
+  const pairsOf = () =>
+    nodeConnectors(doc, projector, node).connectors.filter((c) => c.from.neighbor === fromNeighbor && c.to.neighbor === toNeighbor)
+  if (!allowed) {
+    const pairs = pairsOf()
+    if (pairs.length === 0) setMovementAllowed(doc, projector, node, fromNeighbor, toNeighbor, false)
+    for (const pair of pairs) setLaneConnection(doc, projector, node, fromNeighbor, pair.fromLane, toNeighbor, pair.toLane, false)
+    return
+  }
+  setMovementAllowed(doc, projector, node, fromNeighbor, toNeighbor, true)
+  if (pairsOf().length > 0) return
+  const { arms } = nodeConnectors(doc, projector, node)
+  const from = arms.find((arm) => arm.neighbor === fromNeighbor)
+  const to = arms.find((arm) => arm.neighbor === toNeighbor)
+  if (!from || !to || from.lanesIn === 0 || to.lanesOut === 0) return
+  const kind = turnKind(from, to)
+  const lanes: [number, number][] =
+    kind === 'right'
+      ? [[from.lanesIn - 1, to.lanesOut - 1]]
+      : kind === 'through'
+        ? Array.from({ length: Math.min(from.lanesIn, to.lanesOut) }, (_, i): [number, number] => [from.lanesIn - 1 - i, to.lanesOut - 1 - i])
+        : [[0, 0]]
+  for (const [fromLane, toLane] of lanes) setLaneConnection(doc, projector, node, fromNeighbor, fromLane, toNeighbor, toLane, true)
 }
 
 /** Возвращает узел к автоматическим соединениям. Запреты поворота остаются. */
