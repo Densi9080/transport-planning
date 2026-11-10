@@ -3,10 +3,12 @@ import { AlertCircle, CheckCircle2, Download, FlaskConical, X } from 'lucide-vue
 import { computed, onMounted, ref } from 'vue'
 
 import { exportOsm, type PreflightResult, runPreflight } from '@/api'
+import { changesWithRuleTurns } from '@/core/laneOps'
 import { connectivityReport } from '@/core/validate'
 import { useEditor } from '@/stores/editor'
 
 const TEAM_KEY = 'osm-editor-team-file'
+const RULE_TURNS_KEY = 'osm-editor-rule-turns'
 
 const editor = useEditor()
 const dialog = ref<HTMLDialogElement | null>(null)
@@ -24,6 +26,33 @@ function readStoredName(): string | null {
 }
 
 const fileName = ref(readStoredName() ?? editor.projectName.replace(/\.osm$/i, '') + '_edited')
+
+function readRuleTurns(): boolean {
+  try {
+    return localStorage.getItem(RULE_TURNS_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+
+/** Дописывать turn:lanes по правилам ПДД: SUMO не знает правил редактора и раскладывает полосы по-своему. */
+const ruleTurns = ref(readRuleTurns())
+
+const ruleReport = computed(() => {
+  void editor.rev
+  if (!ruleTurns.value || !editor.doc || !editor.projector) return null
+  return changesWithRuleTurns(editor.doc, editor.projector).report
+})
+
+function exportChanges() {
+  try {
+    localStorage.setItem(RULE_TURNS_KEY, ruleTurns.value ? 'on' : 'off')
+  } catch {
+    // Без браузерного хранилища выбор просто не запомнится
+  }
+  if (!ruleTurns.value || !editor.projector) return editor.doc!.changes()
+  return changesWithRuleTurns(editor.doc!, editor.projector).changes
+}
 
 const connectivity = computed(() => {
   void editor.rev
@@ -71,7 +100,7 @@ async function download(): Promise<void> {
   error.value = null
   try {
     editor.runValidation()
-    const blob = await exportOsm(editor.projectId, editor.doc.changes())
+    const blob = await exportOsm(editor.projectId, exportChanges())
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -98,7 +127,7 @@ async function check(): Promise<void> {
   error.value = null
   preflight.value = null
   try {
-    preflight.value = await runPreflight(editor.projectId, editor.doc.changes())
+    preflight.value = await runPreflight(editor.projectId, exportChanges())
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
@@ -146,6 +175,17 @@ onMounted(() => dialog.value?.showModal())
         </template>
       </span>
     </div>
+
+    <label class="ack rule">
+      <input v-model="ruleTurns" type="checkbox" />
+      <span>
+        Дописать turn:lanes по правилам полос ПДД там, где разметки нет
+        <span v-if="ruleReport" class="faint">
+          — подходов: {{ ruleReport.written }}<template v-if="ruleReport.throughWay">, пропущено {{ ruleReport.throughWay }}: дорога проходит перекрёсток насквозь, тег относился бы ко всем её узлам</template>
+        </span>
+        <span class="faint block">Нужно для SUMO: без тега он раскладывает полосы по своим правилам. Проект в редакторе не меняется, теги попадают только в файл.</span>
+      </span>
+    </label>
 
     <div class="preflight">
       <button class="btn block" :disabled="checking" @click="check">
@@ -239,6 +279,15 @@ h2 {
 .ack input {
   margin-top: 2px;
   accent-color: var(--accent);
+}
+.rule {
+  padding: 8px 10px;
+  background: var(--raised);
+  border-radius: var(--radius-sm);
+}
+.block {
+  display: block;
+  margin-top: 2px;
 }
 .status {
   display: flex;
