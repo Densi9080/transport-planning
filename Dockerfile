@@ -21,7 +21,16 @@ ARG WITH_SUMO=1
 WORKDIR /app
 COPY req.txt ./
 RUN pip install --no-cache-dir -r req.txt gunicorn==23.0.0 \
-    && if [ "$WITH_SUMO" = "1" ]; then pip install --no-cache-dir eclipse-sumo; fi
+    && if [ "$WITH_SUMO" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends libexpat1 libgomp1 \
+        && rm -rf /var/lib/apt/lists/* \
+        && pip install --no-cache-dir eclipse-sumo \
+        && SUMO_BIN="$(python -c 'import sumo, os; print(os.path.join(sumo.SUMO_HOME, "bin"))')" \
+        && missing="$(ldd "$SUMO_BIN/netconvert" "$SUMO_BIN/sumo" | grep 'not found' || true)" \
+        && if [ -n "$missing" ]; then echo "SUMO: не хватает библиотек:"; echo "$missing"; exit 1; fi \
+        && "$SUMO_BIN/netconvert" --version | head -1; \
+    fi
 COPY transport_planning/ ./
 COPY --from=frontend /build/dist ./frontend_dist
 RUN mkdir -p /data
