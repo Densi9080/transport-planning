@@ -11,6 +11,7 @@ import { signApplies } from '@/core/traffic'
 import type { ONode, Tags } from '@/core/types'
 import { useEditor } from '@/stores/editor'
 
+import JunctionPriorityCard from './JunctionPriorityCard.vue'
 import SignalSummary from './SignalSummary.vue'
 import TagTable from './TagTable.vue'
 
@@ -190,6 +191,8 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
       <div v-if="control.main"><dt>Главная по классу</dt><dd>{{ control.main }}</dd></div>
     </dl>
   </div>
+
+  <JunctionPriorityCard v-if="control" :key="`priority${node.id}`" :node="node.id" />
 
   <div v-if="groups.length" class="section">
     <div class="eyebrow">Разрешённые манёвры</div>

@@ -58,6 +58,7 @@ import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
+import { applyJunctionPriority, type PrioritySign } from '@/core/priority'
 import { applyPrioritySigns, type PrioritySuggestion } from '@/core/prioritySuggest'
 import {
   AREA_REACH_M,
@@ -1419,6 +1420,11 @@ export const useEditor = defineStore('editor', () => {
     }
   }
 
+  /** Приоритет перекрёстка: главная дорога по двум подходам и знаки на второстепенных. */
+  function setJunctionPriority(node: number, main: [number, number] | null, signs: Record<number, PrioritySign>): void {
+    mutate(main ? 'Главная дорога на перекрёстке' : 'Равнозначный перекрёсток', (d, p) => applyJunctionPriority(d, p, node, main, signs))
+  }
+
   /** Окно черновой расстановки знаков приоритета. */
   const prioritySuggestOpen = ref(false)
   /** Предлагаемые знаки на карте, пока окно открыто. */
@@ -1722,6 +1728,7 @@ export const useEditor = defineStore('editor', () => {
     placeBump,
     placeSign,
     prioritySuggestOpen,
+    setJunctionPriority,
     signPreview,
     applyPrioritySuggestions,
     smoothSelected,

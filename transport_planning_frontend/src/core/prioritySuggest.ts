@@ -16,7 +16,7 @@ import type { LatLon, Tags } from './types'
  * На кольце уступают въезды.
  */
 
-const RANK: Record<string, number> = {
+export const RANK: Record<string, number> = {
   motorway: 9,
   trunk: 8,
   primary: 7,
@@ -86,11 +86,11 @@ function isRoundabout(tags: Tags | undefined): boolean {
 }
 
 /** Едут ли машины по этому подходу к узлу по ходу дороги. */
-function travelsForward(arm: Arm): boolean {
+export function travelsForward(arm: Arm): boolean {
   return !arm.atStart
 }
 
-function hasSignTowards(doc: OsmDoc, arm: Arm): boolean {
+export function hasSignTowards(doc: OsmDoc, arm: Arm): boolean {
   const ids = arm.atStart ? arm.link.nodes : [...arm.link.nodes].reverse()
   const points = arm.atStart ? arm.link.points : [...arm.link.points].reverse()
   let walked = 0
@@ -103,7 +103,7 @@ function hasSignTowards(doc: OsmDoc, arm: Arm): boolean {
 }
 
 /** Место знака: ближайший свободный узел дороги в 3–30 м от перекрёстка, иначе новая точка в 8 м. */
-function signPlace(doc: OsmDoc, projector: Projector, arm: Arm): { node: number | null; position: LatLon } {
+export function signPlace(doc: OsmDoc, projector: Projector, arm: Arm): { node: number | null; position: LatLon } {
   const ids = arm.atStart ? arm.link.nodes : [...arm.link.nodes].reverse()
   const points = arm.atStart ? arm.link.points : [...arm.link.points].reverse()
   const reach = Math.min(SIGN_MAX_M, arm.link.length / 2)

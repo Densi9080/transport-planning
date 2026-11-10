@@ -41,6 +41,7 @@ import {
   type TurnKind,
   turnKind,
 } from './topology'
+import { armHasNode, readMainRoad } from './priority'
 import { reducedSections, SECTION_SPEEDS } from './traffic'
 import type { OWay, XY } from './types'
 
@@ -668,10 +669,25 @@ function buildCrossings(
   }
 }
 
-function buildTrafficSigns(doc: OsmDoc, signs: Feature[], projector: Projector): void {
+const MAIN_SIGN_M = 14
+
+function buildTrafficSigns(doc: OsmDoc, signs: Feature[], projector: Projector, network: Network): void {
   for (const node of doc.nodes.values()) {
     const tags = node.tags
     if (!tags) continue
+    // Знак 2.1 «Главная дорога» на главных подходах; если главная поворачивает — с табличкой 8.13
+    const main = readMainRoad(tags)
+    if (main) {
+      const arms = network.arms.get(node.id) ?? []
+      const mainArms = arms.filter((arm) => main.some((id) => armHasNode(arm, id)))
+      const bent = mainArms.length === 2 && turnKind(mainArms[0]!, mainArms[1]!, arms) !== 'through'
+      for (const arm of mainArms) {
+        if (arm.lanesIn === 0) continue
+        const points = arm.atStart ? arm.link.points : [...arm.link.points].reverse()
+        const { point } = pointAlong(points, Math.min(MAIN_SIGN_M, arm.link.length / 2))
+        signs.push(pointFeature(point, projector, { icon: bent ? 'sign-main-bent' : 'sign-main' }))
+      }
+    }
     const icon = tags.traffic_calming
       ? 'sign-bump'
       : tags.highway === 'stop'
@@ -863,7 +879,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   }
 
   buildCrossings(doc, network, crossings, signals, projector)
-  buildTrafficSigns(doc, trafficSigns, projector)
+  buildTrafficSigns(doc, trafficSigns, projector, network)
   buildLabels(network, labels, projector, doc)
   for (const way of doc.ways.values()) buildMinor(way, doc, projector, minor)
 

@@ -3,7 +3,8 @@ import { maxSlopePercent } from './elevation'
 import { dist, nearestOnSegment, Projector, segmentsCross } from './geo'
 import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
-import { wayLevel } from './topology'
+import { buildNetwork, wayLevel } from './topology'
+import { junctionPriority } from './priority'
 import { buildStopHierarchy, stopIssues } from './stops'
 import type { LatLon, ORelation, OWay, XY } from './types'
 
@@ -29,6 +30,7 @@ export type IssueCode =
   | 'steep_slope'
   | 'lane_change_mismatch'
   | 'stop_hierarchy'
+  | 'priority_conflict'
 
 export interface Issue {
   id: string
@@ -62,6 +64,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   steep_slope: 'Слишком крутой уклон',
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
   stop_hierarchy: 'Иерархия остановок',
+  priority_conflict: 'Приоритет на перекрёстке',
 }
 
 const BROKEN_JUNCTION_M = 4
@@ -121,6 +124,7 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkRestrictions(context)
   checkSlopes(context)
   checkStops(doc, projector, context.issues)
+  checkPriority(doc, projector, context.issues)
 
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   return context.issues.sort((a, b) => order[a.severity] - order[b.severity])
@@ -741,6 +745,29 @@ function checkStops(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
       position: { lat: position.lat, lon: position.lon },
       wayIds: kind === 'way' ? [id] : [],
       nodeIds: kind === 'node' ? [id] : [],
+    })
+  }
+}
+
+/** Противоречия приоритета по ПДД: знак на главной, второстепенный подход без знака, неоднозначная главная. */
+function checkPriority(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
+  const network = buildNetwork(doc, projector)
+  for (const [node, arms] of network.arms) {
+    if (arms.length < 3) continue
+    const priority = junctionPriority(doc, network, node)
+    const position = doc.nodes.get(node)
+    if (!priority || !position) continue
+    priority.issues.forEach((item, index) => {
+      if (item.severity === 'info') return
+      issues.push({
+        id: `priority-${node}-${index}`,
+        code: 'priority_conflict',
+        severity: item.severity,
+        message: item.text,
+        position: { lat: position.lat, lon: position.lon },
+        wayIds: [],
+        nodeIds: [node],
+      })
     })
   }
 }

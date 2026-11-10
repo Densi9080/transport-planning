@@ -136,6 +136,53 @@ function giveWaySign(ctx: CanvasRenderingContext2D): void {
   ctx.stroke()
 }
 
+/** Знак 2.1 «Главная дорога»: жёлтый ромб в белой кайме с тёмным контуром. */
+function mainRoadDiamond(ctx: CanvasRenderingContext2D, size: number, top: number): void {
+  const c = SIGN_SIZE / 2
+  const r = size / 2
+  const cy = top + r
+  ctx.beginPath()
+  ctx.moveTo(c, cy - r)
+  ctx.lineTo(c + r, cy)
+  ctx.lineTo(c, cy + r)
+  ctx.lineTo(c - r, cy)
+  ctx.closePath()
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#111317'
+  ctx.lineWidth = 3
+  ctx.fill()
+  ctx.stroke()
+  const inner = r * 0.62
+  ctx.beginPath()
+  ctx.moveTo(c, cy - inner)
+  ctx.lineTo(c + inner, cy)
+  ctx.lineTo(c, cy + inner)
+  ctx.lineTo(c - inner, cy)
+  ctx.closePath()
+  ctx.fillStyle = '#facc15'
+  ctx.fill()
+}
+
+function mainRoadSign(ctx: CanvasRenderingContext2D): void {
+  mainRoadDiamond(ctx, SIGN_SIZE - 8, 4)
+}
+
+/** 2.1 с табличкой 8.13 «Направление главной дороги»: ромб меньше, под ним белая табличка с изломом. */
+function mainRoadBentSign(ctx: CanvasRenderingContext2D): void {
+  mainRoadDiamond(ctx, 44, 2)
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#111317'
+  ctx.lineWidth = 2
+  ctx.fillRect(14, 50, SIGN_SIZE - 28, 20)
+  ctx.strokeRect(14, 50, SIGN_SIZE - 28, 20)
+  ctx.beginPath()
+  ctx.moveTo(22, 65)
+  ctx.lineTo(36, 65)
+  ctx.lineTo(48, 54)
+  ctx.lineWidth = 4
+  ctx.stroke()
+}
+
 function bumpSign(ctx: CanvasRenderingContext2D): void {
   const c = SIGN_SIZE / 2
   ctx.beginPath()
@@ -176,6 +223,8 @@ export function registerIcons(map: MlMap): void {
   map.addImage('sign-stop', makeImage(stopSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   map.addImage('sign-give-way', makeImage(giveWaySign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   map.addImage('sign-bump', makeImage(bumpSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  map.addImage('sign-main', makeImage(mainRoadSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  map.addImage('sign-main-bent', makeImage(mainRoadBentSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   for (const speed of SECTION_SPEEDS) {
     map.addImage(`sign-speed-${speed}`, makeImage(speedSign(speed), SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   }
