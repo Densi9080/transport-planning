@@ -5,6 +5,7 @@ import AppToolbar from '@/components/AppToolbar.vue'
 import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
 import ConsoleDock from '@/components/ConsoleDock.vue'
+import BasemapDialog from '@/components/BasemapDialog.vue'
 import CrsDialog from '@/components/CrsDialog.vue'
 import PrioritySuggestPanel from '@/components/PrioritySuggestPanel.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
@@ -76,7 +77,7 @@ function changeLanes(delta: number): void {
 function onKeyDown(event: KeyboardEvent): void {
   if (isTyping(event.target) || !editor.doc || editor.doc.inTransaction) return
   // Пока открыт диалог, клавиши принадлежат ему: Esc закрывает окно, а не снимает выделение
-  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen || editor.pendingRoad || editor.deleteRequest) return
+  if (editor.exportOpen || editor.helpOpen || editor.junctionNode !== null || assistant.settingsOpen || editor.leaveRequest || editor.crsDialogOpen || editor.basemapDialogOpen || editor.pendingRoad || editor.deleteRequest) return
   const key = event.key.toLowerCase()
   const code = event.code
 
@@ -140,7 +141,11 @@ function onKeyDown(event: KeyboardEvent): void {
     editor.finishRoad()
     return
   }
-  if (key === 'backspace' && editor.tool === 'road') {
+  if (key === 'enter' && editor.tool === 'zone') {
+    editor.finishZone()
+    return
+  }
+  if (key === 'backspace' && (editor.tool === 'road' || editor.tool === 'zone')) {
     event.preventDefault()
     editor.drawPoints = editor.drawPoints.slice(0, -1)
     return
@@ -274,6 +279,7 @@ watch(
       <HelpDialog v-if="editor.helpOpen" />
       <SaveGuardDialog v-if="editor.leaveRequest" />
       <CrsDialog v-if="editor.crsDialogOpen" />
+      <BasemapDialog v-if="editor.basemapDialogOpen" />
       <DeleteConfirmDialog v-if="editor.deleteRequest" />
       <NewLinkDialog v-if="editor.pendingRoad" />
       <JunctionEditor v-if="editor.junctionNode !== null" :key="editor.junctionNode" />

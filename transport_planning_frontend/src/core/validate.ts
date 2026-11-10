@@ -5,6 +5,7 @@ import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
 import { checkHiddenUturns, checkMissingOneway, checkRestrictionBypass, checkTransitRoutes } from './networkChecks'
 import { buildNetwork, wayLevel } from './topology'
+import { bindPlatform, unboundPlatforms } from './stopBinding'
 import { buildStopHierarchy, stopIssues } from './stops'
 import type { LatLon, ORelation, OWay, XY } from './types'
 
@@ -30,6 +31,7 @@ export type IssueCode =
   | 'steep_slope'
   | 'lane_change_mismatch'
   | 'stop_hierarchy'
+  | 'stop_unbound'
   | 'hidden_uturn'
   | 'restriction_bypass'
   | 'transit_access'
@@ -68,6 +70,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   steep_slope: 'Слишком крутой уклон',
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
   stop_hierarchy: 'Иерархия остановок',
+  stop_unbound: 'Остановка не привязана к графу',
   hidden_uturn: 'Разворот через короткий съезд',
   restriction_bypass: 'Запрет обходится через соседний въезд',
   transit_access: 'Маршрут ОТ по закрытой для него дороге',
@@ -741,6 +744,25 @@ export function connectivityReport(doc: OsmDoc): ConnectivityReport {
 
 /** Пункт без зоны и остановка без пунктов — ошибки модели ОТ, остальное предупреждения. */
 function checkStops(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
+  // Платформа у обочины без пункта на дороге: автобус не знает, где на графе встать
+  for (const binding of unboundPlatforms(doc, projector)) {
+    const platform = doc.node(binding.platform)
+    const offRoad = binding.routesOffRoad.length
+    issues.push({
+      id: `stop-unbound-${binding.platform}`,
+      code: 'stop_unbound',
+      severity: 'warning',
+      message:
+        `Остановка «${binding.name || binding.platform}» есть только платформой у обочины, пункта на дороге нет. ` +
+        `Пункт встанет на дорогу ${binding.wayId} в ${Math.round(binding.distanceM)} м` +
+        (offRoad ? `; ${offRoad} маршр. идут по другой дороге, их проверьте вручную` : ''),
+      position: { lat: platform.lat, lon: platform.lon },
+      wayIds: [binding.wayId],
+      nodeIds: [binding.platform],
+      fixLabel: 'Поставить пункт на дорогу',
+      fix: () => bindPlatform(doc, projector, binding),
+    })
+  }
   const hierarchy = buildStopHierarchy(doc, projector)
   for (const issue of stopIssues(hierarchy)) {
     const { kind, id } = issue.target

@@ -54,6 +54,11 @@ function openAssistant(): void {
   editor.rightTab = 'assistant'
 }
 
+function openCustomTiles(): void {
+  editor.basemap = 'custom'
+  editor.basemapDialogOpen = true
+}
+
 function runSim(level: 'macro' | 'micro'): void {
   editor.viewMode = 'sim'
   sim.setLevel(level)
@@ -138,6 +143,8 @@ const menus = computed<Menu[]>(() => [
       separator,
       { label: 'Список линий', action: () => openList('lines') },
       { label: 'Список остановок', action: () => openList('stops') },
+      separator,
+      { label: 'Привязать остановки к графу', action: () => editor.bindAllStops() },
     ],
   },
   {
@@ -147,6 +154,7 @@ const menus = computed<Menu[]>(() => [
       { label: 'Микромодель: движение машин', action: () => runSim('micro') },
       separator,
       { label: 'Список отрезков с результатами', action: () => openList('links') },
+      { label: 'Новый транспортный район…', checked: editor.tool === 'zone', action: () => editor.setTool('zone') },
       { label: 'Районы', action: () => openList('zones') },
       { label: 'Матрица корреспонденций', action: () => openList('matrix') },
     ],
@@ -160,11 +168,17 @@ const menus = computed<Menu[]>(() => [
   },
   {
     title: 'Подложка',
-    items: BASEMAP_OPTIONS.map((option) => ({
-      label: option.label,
-      checked: editor.basemap === option.id,
-      action: () => (editor.basemap = option.id),
-    })),
+    items: [
+      ...BASEMAP_OPTIONS.map((option) => ({
+        label: option.label,
+        checked: editor.basemap === option.id,
+        action: () => (editor.basemap = option.id),
+      })),
+      { label: 'Свой адрес тайлов…', checked: editor.basemap === 'custom', action: () => openCustomTiles() },
+      separator,
+      { label: 'Подложка рядом с графом', checked: editor.compareOpen, action: () => (editor.compareOpen = !editor.compareOpen) },
+      { label: 'Свой снимок и настройки…', action: () => (editor.basemapDialogOpen = true) },
+    ],
   },
   {
     title: 'Справка',

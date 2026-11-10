@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import { laneNumber } from '@/core/lanePick'
 import { readLaneValue, writeLaneValue } from '@/core/laneTags'
+import { VOLUME_BASE, withLaneVolume } from '@/core/zones'
 import type { OWay } from '@/core/types'
 import { useEditor } from '@/stores/editor'
 
@@ -12,6 +13,12 @@ const editor = useEditor()
 const lane = computed(() => (editor.selectedLane?.wayId === props.way.id ? editor.selectedLane : null))
 const tags = computed(() => props.way.tags ?? {})
 const speed = computed(() => (lane.value ? readLaneValue(tags.value, 'maxspeed', lane.value.forward, lane.value.lane) : ''))
+const volume = computed(() => (lane.value ? readLaneValue(tags.value, VOLUME_BASE, lane.value.forward, lane.value.lane) : ''))
+
+function setVolume(value: string): void {
+  if (!lane.value) return
+  editor.updateWayTags(props.way.id, withLaneVolume(tags.value, lane.value.forward, lane.value.lane, value), 'Интенсивность полосы')
+}
 
 function setSpeed(value: string): void {
   if (!lane.value) return
@@ -26,6 +33,10 @@ function setSpeed(value: string): void {
     <label class="field">
       <span>Скорость полосы, км/ч</span>
       <input class="input" type="number" min="0" step="5" :value="speed" :placeholder="tags.maxspeed ?? 'как у дороги'" @change="setSpeed(($event.target as HTMLInputElement).value)" />
+    </label>
+    <label class="field">
+      <span>Интенсивность, авт/ч</span>
+      <input class="input" type="number" min="0" step="10" :value="volume" placeholder="не задана" @change="setVolume(($event.target as HTMLInputElement).value)" />
     </label>
   </div>
 </template>

@@ -8,6 +8,7 @@ import {
   Marker,
   NavigationControl,
   ScaleControl,
+  addProtocol,
   setWorkerUrl,
 } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -16,10 +17,10 @@ import type { Feature, FeatureCollection } from 'geojson'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { OsmDoc } from '@/core/doc'
-import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, type Projector, sub, unit } from '@/core/geo'
+import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, type Projector, segmentsCross, smoothCurve, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
 import type { LanePort } from '@/core/lanePick'
-import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
+import { isDrivable, laneOffsets, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
@@ -32,6 +33,10 @@ import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE }
 import type { LatLon, ONode, XY } from '@/core/types'
 import { ensureLabelImage, registerIcons } from '@/map/icons'
 import { CarLayer } from '@/map/carLayer'
+import { registerEllipsoidMercator } from '@/map/ellipsoidMercator'
+import { ensureSignImage } from '@/map/signIcons'
+import { polygonArea, readUserZones, zoneContaining } from '@/core/zones'
+import { estimateZonePopulation } from '@/sim/macro'
 import CoordMenu from '@/components/CoordMenu.vue'
 import {
   basemapSource,
@@ -55,6 +60,7 @@ import { useTraffic } from '@/stores/traffic'
 
 // Сам MapLibre ищет воркер рядом со своим модулем, а после сборки его там нет
 setWorkerUrl(mapWorkerUrl)
+registerEllipsoidMercator(addProtocol)
 
 const NODE_PICK_PX = 11
 const PITCH_3D = 5
@@ -77,7 +83,9 @@ const SEGMENT_PICK_PX = 7
 const SNAP_PX = 13
 const ANGLE_STEP_DEG = 15
 const MIN_DRAW_STEP_PX = 5
-const BAR_MAX_PX = 34
+const BAR_MAX_PX = 16
+/** Половина полосы: от оси крайней правой полосы до кромки. */
+const HALF_LANE_M = 1.75
 const BAR_VEHICLES_PER_PX = 70
 const BAR_LABEL_MIN = 300
 const BAR_LABEL_COUNT = 40
@@ -403,6 +411,7 @@ function renderScene(): void {
   const { scene, network: laneNetwork } = buildScene(editor.doc, editor.projector)
   setData('laneLines', { type: 'FeatureCollection', features: laneLineFeatures(laneNetwork) })
   setData('netStops', { type: 'FeatureCollection', features: stopObjectFeatures() })
+  setData('userZones', { type: 'FeatureCollection', features: userZoneFeatures() })
   for (const feature of scene.labels.features) {
     const name = feature.properties?.name as string
     feature.properties = { ...feature.properties, image: ensureLabelImage(map, name, editor.theme) }
@@ -678,6 +687,7 @@ function renderOverlay(): void {
   if (snap) features.push(pointOf(snap.position, { role: 'snap' }))
 
   if (editor.tool === 'road') renderDrawPreview(features)
+  else if (editor.tool === 'zone') renderZonePreview(features)
   else hud.value = editLabels()
   if (editor.speedStart) features.push(pointOf(editor.speedStart.position, { role: 'draw-point' }))
   const connector = editor.connectorPreview
@@ -797,42 +807,98 @@ function formatAngle(from: XY, to: XY): string {
   return `${Math.round(bearing(unit(sub(to, from))))}°`
 }
 
+/**
+ * Предпросмотр новой дороги — такой, какой она получится: настил шириной по профилю, полосы,
+ * стрелки направления, в режиме «Кривая» — уже сглаженная линия. Отрезок до курсора пунктиром,
+ * места, где дорога пересечёт существующие без общего узла, отмечены.
+ */
 function renderDrawPreview(features: Feature[]): void {
   const projector = editor.projector!
   const m = map!
-  const points: LatLon[] = [...editor.drawPoints]
-  if (cursorPosition && editor.drawPoints.length > 0) points.push(cursorPosition)
-  const xy = points.map((p) => projector.toXY(p))
+  const fixed = editor.drawPoints.map((p) => projector.toXY(p))
+  const cursor = cursorPosition && editor.drawPoints.length > 0 ? projector.toXY(cursorPosition) : null
+  const control = cursor ? [...fixed, cursor] : fixed
   const labels: typeof hud.value = []
+  const curve = editor.drawMode === 'curve' && control.length >= 3
+  const axis = curve ? smoothCurve(control) : control
 
-  if (xy.length >= 2) {
+  if (axis.length >= 2) {
     const profile = parseProfile(editor.preset.tags)
-    const half = totalWidth(profile) / 2
-    const left = offsetPolyline(xy, half)
-    const right = offsetPolyline(xy, -half)
-    const ring = [...left, ...right.reverse()].map((p) => projector.toLngLat(p))
+    const offsets = laneOffsets(profile)
+    const left = offsetPolyline(axis, offsets.left)
+    const right = offsetPolyline(axis, offsets.right)
+    const ring = [...left, ...[...right].reverse()].map((p) => projector.toLngLat(p))
     ring.push(ring[0]!)
-    features.push({
-      type: 'Feature',
-      properties: { role: 'ribbon' },
-      geometry: { type: 'Polygon', coordinates: [ring] },
-    })
-    features.push(lineOf(xy, { role: 'draw' }))
-    for (let i = 1; i < xy.length; i++) {
-      const a = xy[i - 1]!
-      const b = xy[i]!
+    features.push({ type: 'Feature', properties: { role: 'draw-surface' }, geometry: { type: 'Polygon', coordinates: [ring] } })
+    features.push(lineOf(left, { role: 'draw-edge' }))
+    features.push(lineOf(right, { role: 'draw-edge' }))
+    for (const offset of [...offsets.forwardBoundaries, ...offsets.backwardBoundaries]) features.push(lineOf(offsetPolyline(axis, offset), { role: 'draw-lane' }))
+    if (offsets.forward.length && offsets.backward.length) features.push(lineOf(offsetPolyline(axis, offsets.divider), { role: 'draw-divider' }))
+    // Стрелки по центрам полос: сразу видно, в какую сторону будет движение
+    for (const offset of offsets.forward) features.push(lineOf(offsetPolyline(axis, offset), { role: 'draw-flow' }))
+    for (const offset of offsets.backward) features.push(lineOf(offsetPolyline([...axis].reverse(), -offset), { role: 'draw-flow' }))
+    // Ось: поставленная часть сплошной, отрезок до курсора пунктиром
+    if (curve) features.push(lineOf(axis, { role: cursor ? 'draw-rubber' : 'draw' }))
+    else {
+      if (fixed.length >= 2) features.push(lineOf(fixed, { role: 'draw' }))
+      if (cursor && fixed.length) features.push(lineOf([fixed.at(-1)!, cursor], { role: 'draw-rubber' }))
+    }
+    const crossings = crossingsWithoutNode(axis)
+    for (const crossing of crossings) features.push(pointOf(projector.toLatLon(crossing), { role: 'draw-cross' }))
+
+    for (let i = 1; i < control.length; i++) {
+      const a = control[i - 1]!
+      const b = control[i]!
       const middle = projector.toLatLon({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
       const screen = m.project([middle.lon, middle.lat])
       labels.push({ x: screen.x, y: screen.y, text: `${dist(a, b).toFixed(1)} м · ${formatAngle(a, b)}` })
     }
-    if (xy.length > 2) {
-      const tip = points.at(-1)!
-      const screen = m.project([tip.lon, tip.lat])
-      labels.push({ x: screen.x + 8, y: screen.y - 22, text: `всего ${polylineLength(xy).toFixed(0)} м` })
+    const tip = cursorPosition ?? editor.drawPoints.at(-1)!
+    const screen = m.project([tip.lon, tip.lat])
+    const parts = [`всего ${polylineLength(axis).toFixed(0)} м`]
+    if (crossings.length) parts.push(`пересечений без узла: ${crossings.length}`)
+    if (control.length > 2 || crossings.length) labels.push({ x: screen.x + 8, y: screen.y - 22, text: parts.join(' · ') })
+  }
+  // К чему пристанет следующая точка: к узлу или к дороге (тогда на ней появится новый узел)
+  if (cursorSnap && cursorPosition) {
+    const screen = m.project([cursorPosition.lon, cursorPosition.lat])
+    labels.push({
+      x: screen.x + 14,
+      y: screen.y + 16,
+      text: cursorSnap.nodeId !== undefined ? `к узлу ${cursorSnap.nodeId}` : `новый узел на дороге ${cursorSnap.wayId}`,
+    })
+  } else if (cursorPosition && editor.drawPoints.length === 0) {
+    features.push(pointOf(cursorPosition, { role: 'draw-point', ghost: true }))
+  }
+  editor.drawPoints.forEach((point, index) => {
+    const joined = point.nodeId !== undefined || point.wayId !== undefined
+    features.push(pointOf(point, { role: 'draw-point', first: index === 0, joined }))
+  })
+  hud.value = labels
+}
+
+/** Где линия пересекает существующие проезжие дороги не в их узлах: там нужен узел или мост. */
+function crossingsWithoutNode(axis: XY[]): XY[] {
+  refreshWayCache()
+  const ends = new Set<number>()
+  for (const point of editor.drawPoints) {
+    if (point.nodeId !== undefined) ends.add(point.nodeId)
+  }
+  const result: XY[] = []
+  for (const entry of wayCache.values()) {
+    if (!entry.drivable) continue
+    for (let i = 1; i < entry.points.length; i++) {
+      for (let j = 1; j < axis.length; j++) {
+        const hit = segmentsCross(axis[j - 1]!, axis[j]!, entry.points[i - 1]!, entry.points[i]!)
+        // Пересечение в узле, к которому линия и так пристыкована, — это стык, а не пересечение
+        if (hit && !result.some((point) => dist(point, hit) < 1)) {
+          const nearEnd = [entry.ids[i - 1]!, entry.ids[i]!].some((id, k) => ends.has(id) && dist(entry.points[i - 1 + k]!, hit) < 1)
+          if (!nearEnd) result.push(hit)
+        }
+      }
     }
   }
-  for (const point of editor.drawPoints) features.push(pointOf(point, { role: 'draw-point' }))
-  hud.value = labels
+  return result
 }
 
 function constrained(lngLat: LngLat, shift: boolean): LatLon {
@@ -894,6 +960,15 @@ function onMouseMove(event: MapMouseEvent): void {
     const source = editor.connectorFrom
     hoverPort = port && (source ? !port.incoming && port.node === source.node && port.neighbor !== source.neighbor : port.incoming) ? port : null
     map!.getCanvas().style.cursor = hoverPort ? 'pointer' : 'crosshair'
+    scheduleOverlay()
+    return
+  }
+
+  if (editor.tool === 'zone') {
+    cursorSnap = null
+    cursorPosition = { lat: event.lngLat.lat, lon: event.lngLat.lng }
+    hover = null
+    map!.getCanvas().style.cursor = 'crosshair'
     scheduleOverlay()
     return
   }
@@ -1208,7 +1283,7 @@ function onClick(event: MapMouseEvent): void {
       if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
         const { x, y } = event.point
         const turn = nearestFeature(
-          map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon', 'turn-line-bridge', 'turn-ribbon-bridge'] }),
+          map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon', 'turn-line-bridge', 'turn-ribbon-bridge', 'turn-forbidden'] }),
           event.point,
         )
         const props = turn?.properties as { node?: number; from?: number; to?: number; fromLane?: number } | undefined
@@ -1221,6 +1296,14 @@ function onClick(event: MapMouseEvent): void {
       }
       // Вершины выбранного отрезка двигают мышью, щелчок по ним не должен менять выбор
       if (hit?.kind === 'node' && editor.activeObject === 'links' && !isSim) return
+      // Щелчок внутри контура района, мимо дорог, выбирает район
+      if (!hit && !isSim && editor.doc && editor.projector) {
+        const zone = zoneContaining(readUserZones(editor.doc, editor.projector), editor.projector.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng }))
+        if (zone) {
+          editor.selectOne({ kind: 'way', id: zone.wayId })
+          return
+        }
+      }
       const accepted = hit && (isSim || (hit.kind === 'node' ? editor.acceptsNode(hit.id) : editor.acceptsWay(hit.id)))
       if (!accepted) {
         if (!original.shiftKey) editor.select([])
@@ -1255,6 +1338,9 @@ function onClick(event: MapMouseEvent): void {
       break
     case 'road':
       addDrawPoint(event)
+      break
+    case 'zone':
+      addZonePoint(event)
       break
     case 'split':
       if (hit?.kind === 'node') editor.splitAtNode(hit.id)
@@ -1325,6 +1411,65 @@ function addDrawPoint(event: MapMouseEvent): void {
   scheduleOverlay()
 }
 
+function addZonePoint(event: MapMouseEvent): void {
+  const last = editor.drawPoints.at(-1)
+  if (last) {
+    const previous = map!.project([last.lon, last.lat])
+    if (Math.hypot(previous.x - event.point.x, previous.y - event.point.y) < MIN_DRAW_STEP_PX) return
+  }
+  editor.drawPoints = [...editor.drawPoints, { lat: event.lngLat.lat, lon: event.lngLat.lng }]
+  scheduleOverlay()
+}
+
+/** Контур нового района: заливка, стороны, площадь и оценка жителей по застройке внутри. */
+function renderZonePreview(features: Feature[]): void {
+  const projector = editor.projector!
+  const points = [...editor.drawPoints]
+  if (cursorPosition && points.length > 0) points.push(cursorPosition)
+  const xy = points.map((p) => projector.toXY(p))
+  const labels: typeof hud.value = []
+  if (xy.length >= 3) {
+    const ring = [...xy, xy[0]!].map((p) => projector.toLngLat(p))
+    features.push({ type: 'Feature', properties: { role: 'zone-draft' }, geometry: { type: 'Polygon', coordinates: [ring] } })
+  }
+  if (xy.length >= 2) features.push(lineOf(xy.length >= 3 ? [...xy, xy[0]!] : xy, { role: 'draw-rubber' }))
+  for (const point of editor.drawPoints) features.push(pointOf(point, { role: 'draw-point' }))
+  const tip = cursorPosition ?? editor.drawPoints.at(-1)
+  if (tip && xy.length >= 3) {
+    const screen = map!.project([tip.lon, tip.lat])
+    const estimate = estimateZonePopulation(editor.doc!, projector, xy)
+    const hectares = polygonArea(xy) / 10_000
+    labels.push({
+      x: screen.x + 12,
+      y: screen.y - 22,
+      text: `${hectares.toFixed(1)} га · по застройке ≈ ${estimate.residents} жит., ${estimate.jobs} раб. мест`,
+    })
+  } else if (tip) {
+    const screen = map!.project([tip.lon, tip.lat])
+    labels.push({ x: screen.x + 12, y: screen.y - 22, text: 'Щелчками обведите район, Enter или двойной щелчок — готово' })
+  }
+  hud.value = labels
+}
+
+/** Районы, заданные вручную: контур, заливка и подпись с жителями. */
+function userZoneFeatures(): Feature[] {
+  const doc = editor.doc
+  const projector = editor.projector
+  if (!doc || !projector || !map) return []
+  const features: Feature[] = []
+  for (const zone of readUserZones(doc, projector)) {
+    const ring = [...zone.polygon, zone.polygon[0]!].map((p) => projector.toLngLat(p))
+    features.push({ type: 'Feature', properties: { wayId: zone.wayId, kind: 'area' }, geometry: { type: 'Polygon', coordinates: [ring] } })
+    const text = `${zone.name}: ${zone.residents} жит., ${zone.jobs} раб. мест`
+    features.push({
+      type: 'Feature',
+      properties: { wayId: zone.wayId, kind: 'label', image: ensureLabelImage(map, text, editor.theme) },
+      geometry: { type: 'Point', coordinates: projector.toLngLat(zone.centroid) },
+    })
+  }
+  return features
+}
+
 function onDoubleClick(event: MapMouseEvent): void {
   if (editor.mode === 'select' && editor.selectShape === 'polygon' && editor.selectPolygon.length > 0) {
     event.preventDefault()
@@ -1345,6 +1490,12 @@ function onDoubleClick(event: MapMouseEvent): void {
   if (editor.tool === 'road') {
     event.preventDefault()
     editor.finishRoad()
+    scheduleOverlay()
+    return
+  }
+  if (editor.tool === 'zone') {
+    event.preventDefault()
+    editor.finishZone()
     scheduleOverlay()
     return
   }
@@ -1375,7 +1526,7 @@ function applyView(): void {
   visible(SIM_LAYERS, false)
   const macro = isSim && sim.level === 'macro'
   const micro = isSim && sim.level === 'micro'
-  visible(['sim-load'], isSim && sim.showLoad && (micro || sim.macroView === 'fill'))
+  visible(['sim-load', 'sim-flow'], isSim && sim.showLoad && (micro || sim.macroView === 'fill'))
   visible(['sim-bars', 'sim-bar-labels'], macro && sim.macroView === 'bars')
   visible(['sim-od', 'sim-zones'], macro && sim.showDesire)
   visible(['sim-jams', 'sim-signals'], micro)
@@ -1396,7 +1547,7 @@ function applyView(): void {
   visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
   visible(['net-stop-area', 'net-stop-area-line', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
   visible(['net-stop', 'net-stop-fill', 'net-stop-label'], !isSim && !editor.objectHidden.stops)
-  visible(['crossings'], lane && editor.layers.crossings)
+  visible(['crossings-axis', 'crossings-band', 'crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
   visible(['traffic-signs'], editor.layers.trafficSigns)
   visible(['zone-area', 'zone-outline', 'zone-link', 'zone-label'], editor.layers.zones)
@@ -1422,7 +1573,7 @@ function applyBasemap(): void {
     if (m.getLayer(id)) m.removeLayer(id)
     if (m.getSource(id)) m.removeSource(id)
   }
-  basemapSource(editor.basemap, editor.customTileUrl).forEach((spec, index) => {
+  basemapSource(editor.basemap, editor.customTileUrl, editor.customTileCrs).forEach((spec, index) => {
     const id = BASEMAP_LAYERS[index]!
     m.addSource(id, spec)
     m.addLayer(
@@ -1577,14 +1728,17 @@ function applySimNet(): void {
     })
   }
   setData('simLoad', { type: 'FeatureCollection', features })
+  // Линия загрузки и столбики идут по правой кромке своего направления: дорогу и её полосы
+  // они не закрывают, а оба направления видны отдельно, как в Visum
   const bars: Feature[] = []
   for (const edge of net.edges) {
-    const lane = edge.lanes[Math.floor(edge.lanes.length / 2)]
-    if (!lane) continue
+    const lane = edge.lanes.at(-1)
+    if (!lane || lane.points.length < 2) continue
+    const kerb = offsetPolyline(lane.points, -HALF_LANE_M)
     bars.push({
       type: 'Feature',
       properties: { id: edge.id, wayId: edge.wayId },
-      geometry: { type: 'LineString', coordinates: lane.points.map((point) => projector.toLngLat(point)) },
+      geometry: { type: 'LineString', coordinates: kerb.map((point) => projector.toLngLat(point)) },
     })
   }
   setData('simBars', { type: 'FeatureCollection', features: bars })
@@ -1657,9 +1811,12 @@ function applyLoadColors(): void {
     }
     applyMacroOverlays()
   } else {
+    const bars = !!m.getSource('simBars')
     for (const edge of net.edges) {
       const hasTraffic = edge.carCount > 0 || edge.speedRatio < 0.95
-      m.setFeatureState({ source: 'simLoad', id: edge.id }, { los: hasTraffic ? losFromSpeedRatio(edge.speedRatio) : -1 })
+      const los = hasTraffic ? losFromSpeedRatio(edge.speedRatio) : -1
+      m.setFeatureState({ source: 'simLoad', id: edge.id }, { los })
+      if (bars) m.setFeatureState({ source: 'simBars', id: edge.id }, { los, w: 0 })
     }
   }
 }
@@ -1794,6 +1951,10 @@ onMounted(() => {
   instance.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
   instance.addControl(new ScaleControl({ unit: 'metric', maxWidth: 140 }), 'bottom-left')
 
+  // Знаки ПДД рисуются по номеру, когда слой впервые их попросит
+  instance.on('styleimagemissing', (event) => {
+    if (event.id.startsWith('sign:')) ensureSignImage(instance, event.id)
+  })
   instance.on('load', () => {
     registerIcons(instance)
     for (const layer of buildLayers(center[1])) instance.addLayer(layer)
@@ -1805,7 +1966,7 @@ onMounted(() => {
       return edge ? parseSpeed(edge.tags.maxspeed, edge.tags.highway ?? 'road') / 3.6 : 14
     }
     carLayerTop.limitOf = carLayer.limitOf
-    instance.addLayer(carLayer, 'bridge-casing')
+    instance.addLayer(carLayer, 'bridge-shadow')
     instance.addLayer(carLayerTop, 'buildings-3d')
     backdrop = buildStaticScene(doc)
     applyStatic()
@@ -1911,7 +2072,7 @@ watch(() => editor.tool, () => {
   if (map) map.getCanvas().style.cursor = editor.tool === 'select' ? '' : editor.tool === 'pan' ? 'grab' : 'crosshair'
   scheduleOverlay()
 })
-watch(() => [editor.basemap, editor.customTileUrl], applyBasemap)
+watch(() => [editor.basemap, editor.customTileUrl, editor.customTileCrs], applyBasemap)
 watch(() => editor.basemapOpacity, (value) => {
   for (const id of BASEMAP_LAYERS) if (map?.getLayer(id)) map.setPaintProperty(id, 'raster-opacity', value)
 })

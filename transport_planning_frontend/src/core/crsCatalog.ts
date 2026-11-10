@@ -37,6 +37,8 @@ function build(): CrsEntry[] {
     { id: 'EPSG:4200', name: 'Pulkovo 1995 (СК-95)', group: GROUP_GEO, def: `+proj=longlat +ellps=krass +towgs84=${TOWGS_95} +no_defs` },
     { id: 'EPSG:7683', name: 'ГСК-2011', group: GROUP_GEO, def: '+proj=longlat +a=6378136.5 +rf=298.2564151 +towgs84=0,0,0,0,0,0,0 +no_defs' },
     { id: 'EPSG:3857', name: 'WGS 84 / Pseudo-Mercator', group: GROUP_PROJ, def: '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs' },
+    // Меркатор на эллипсоиде WGS 84: в нём нарезаны тайлы Яндекс Карт. Северная координата тут меньше, чем в 3857
+    { id: 'EPSG:3395', name: 'WGS 84 / World Mercator (Яндекс Карты)', group: GROUP_PROJ, def: '+proj=merc +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs' },
     { id: DMS_ID, name: 'WGS 84, градусы, минуты, секунды', group: GROUP_FORMAT },
     { id: LOCAL_ID, name: 'Локальные метры от центра участка', group: GROUP_FORMAT },
   ]
@@ -60,5 +62,6 @@ export const LEGACY_CRS: Record<string, string> = {
   utm: 'EPSG:32648',
   gk42: 'EPSG:28418',
   mercator: 'EPSG:3857',
+  yandex: 'EPSG:3395',
   local: LOCAL_ID,
 }

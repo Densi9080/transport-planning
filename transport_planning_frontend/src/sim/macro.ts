@@ -1,8 +1,9 @@
 import type { OsmDoc } from '@/core/doc'
-import { dist } from '@/core/geo'
+import { dist, pointInPolygon } from '@/core/geo'
 import { totalWidth } from '@/core/lanes'
 import { greenShare } from '@/core/signals'
 import type { XY } from '@/core/types'
+import { countedVolume, M2_PER_JOB, M2_PER_RESIDENT, readUserZones, zoneContaining } from '@/core/zones'
 
 import { classRank, type SimEdge, type SimNet } from './net'
 import type { TransitService } from './transit'
@@ -38,6 +39,8 @@ export interface EdgeLoad {
   /** Автобусов и троллейбусов в час. */
   busesPerHour: number
   vc: number
+  /** Интенсивность, введённая вручную по полосам, авт/ч: для сравнения с расчётом. */
+  counted: number | null
   timeS: number
   speedKmh: number
   los: number
@@ -55,6 +58,10 @@ export interface Zone {
   /** Граница и центр района: только у районов из застройки, у въездов на границе их нет. */
   outline?: XY[]
   center?: XY
+  /** Район задан вручную контуром tp:type=zone: его жители и рабочие места. */
+  userWay?: number
+  residents?: number
+  jobs?: number
 }
 
 export interface OdRoute {
@@ -254,6 +261,7 @@ export function edgeBaseLoad(doc: OsmDoc, net: SimNet, edge: SimEdge): EdgeLoad 
     transitPcu: 0,
     busesPerHour: 0,
     vc: 0,
+    counted: countedVolume(edge.tags, edge.forward),
     timeS: freeTimeS + nodeDelay,
     speedKmh: freeSpeedKmh,
     los: 0,
@@ -261,7 +269,7 @@ export function edgeBaseLoad(doc: OsmDoc, net: SimNet, edge: SimEdge): EdgeLoad 
   }
 }
 
-function buildingFloorArea(doc: OsmDoc, nds: number[], projector: SimNet['projector'], levelsTag: string | undefined): { area: number; center: XY } {
+export function buildingFloorArea(doc: OsmDoc, nds: number[], projector: SimNet['projector'], levelsTag: string | undefined): { area: number; center: XY } {
   const points = nds.map((id) => doc.nodes.get(id)).filter((n): n is NonNullable<typeof n> => !!n).map((n) => projector.toXY(n))
   let area = 0
   let cx = 0
@@ -281,8 +289,8 @@ function buildingFloorArea(doc: OsmDoc, nds: number[], projector: SimNet['projec
   }
 }
 
-const RESIDENTIAL_TYPES = new Set(['apartments', 'residential', 'house', 'detached', 'terrace', 'dormitory', 'semidetached_house'])
-const JOB_TYPES = new Set([
+export const RESIDENTIAL_TYPES = new Set(['apartments', 'residential', 'house', 'detached', 'terrace', 'dormitory', 'semidetached_house'])
+export const JOB_TYPES = new Set([
   'commercial', 'retail', 'office', 'university', 'school', 'college', 'kindergarten', 'hospital', 'public',
   'government', 'industrial', 'warehouse', 'civic', 'supermarket', 'hotel',
 ])
@@ -365,14 +373,16 @@ function buildGateways(net: SimNet, doc: OsmDoc, loads: Map<SimEdge, EdgeLoad>, 
   }
   for (const edge of net.edges) {
     if (classRank(edge.tags) < GATEWAY_MIN_RANK) continue
+    // Интенсивность, введённая по полосам, точнее оценки по пропускной способности
+    const counted = loads.get(edge)?.counted ?? null
     if (edge.moves.size === 0 && reachableFromCore.has(edge)) {
       const item = entry(edge.to)
-      item.attraction += (loads.get(edge)?.capacity ?? 0) * GATEWAY_SHARE
+      item.attraction += counted ?? (loads.get(edge)?.capacity ?? 0) * GATEWAY_SHARE
       item.name ??= edge.tags.name
     }
     if (!entered.has(edge) && reachesCore.has(edge)) {
       const item = entry(edge.from)
-      item.production += (loads.get(edge)?.capacity ?? 0) * GATEWAY_SHARE
+      item.production += counted ?? (loads.get(edge)?.capacity ?? 0) * GATEWAY_SHARE
       item.name ??= edge.tags.name
     }
   }
@@ -395,12 +405,15 @@ function buildGateways(net: SimNet, doc: OsmDoc, loads: Map<SimEdge, EdgeLoad>, 
 
 function buildInternalZones(net: SimNet, doc: OsmDoc, period: Period, startId: number, core: Set<SimEdge>): Zone[] {
   const projector = net.projector
+  const userZones = readUserZones(doc, projector)
   const cells = new Map<string, { res: number; jobs: number; x: number; y: number; w: number; points: XY[] }>()
   for (const way of doc.ways.values()) {
     const tags = way.tags
     if (!tags?.building || tags.building === 'no' || way.nds.length < 4) continue
     const { area, center } = buildingFloorArea(doc, way.nds, projector, tags['building:levels'])
     if (area <= 0) continue
+    // Застройку внутри района, заданного вручную, описывают его жители и рабочие места
+    if (zoneContaining(userZones, center)) continue
     const key = `${Math.floor(center.x / GRID_M)}:${Math.floor(center.y / GRID_M)}`
     const cell = cells.get(key) ?? { res: 0, jobs: 0, x: 0, y: 0, w: 0, points: [] }
     for (const nd of way.nds) {
@@ -467,7 +480,62 @@ function buildInternalZones(net: SimNet, doc: OsmDoc, period: Period, startId: n
       center,
     })
   }
+  // Районы пользователя: жители уезжают утром и возвращаются вечером, к рабочим местам наоборот
+  for (const user of userZones) {
+    if (user.residents + user.jobs <= 0) continue
+    const nearest = (nodes: number[], reach: number): number | null => {
+      let found: number | null = null
+      let bestDistance = reach
+      for (const node of nodes) {
+        const nodeData = doc.nodes.get(node)
+        if (!nodeData) continue
+        const distance = dist(projector.toXY(nodeData), user.centroid)
+        if (distance < bestDistance) {
+          bestDistance = distance
+          found = node
+        }
+      }
+      return found
+    }
+    const best = nearest(streets, ZONE_SEARCH_M * 2) ?? nearest(candidates, Number.POSITIVE_INFINITY)
+    if (best === null) continue
+    const resM2 = user.residents * M2_PER_RESIDENT
+    const jobM2 = user.jobs * M2_PER_JOB
+    zones.push({
+      id: startId + zones.length,
+      node: best,
+      kind: 'internal',
+      production: resM2 * RESIDENTIAL_TRIPS_PER_M2 * share.resOut + jobM2 * JOB_TRIPS_PER_M2 * share.jobOut,
+      attraction: resM2 * RESIDENTIAL_TRIPS_PER_M2 * share.resIn + jobM2 * JOB_TRIPS_PER_M2 * share.jobIn,
+      position: projector.toXY(doc.node(best)),
+      label: user.name,
+      outline: user.polygon,
+      center: user.centroid,
+      userWay: user.wayId,
+      residents: user.residents,
+      jobs: user.jobs,
+    })
+  }
   return zones
+}
+
+/** Оценка жителей и рабочих мест района по площади этажей зданий внутри контура. */
+export function estimateZonePopulation(doc: OsmDoc, projector: SimNet['projector'], polygon: XY[]): { residents: number; jobs: number } {
+  let res = 0
+  let jobs = 0
+  for (const way of doc.ways.values()) {
+    const tags = way.tags
+    if (!tags?.building || tags.building === 'no' || way.nds.length < 4) continue
+    const { area, center } = buildingFloorArea(doc, way.nds, projector, tags['building:levels'])
+    if (area <= 0 || !pointInPolygon(center, polygon)) continue
+    if (RESIDENTIAL_TYPES.has(tags.building)) res += area
+    else if (JOB_TYPES.has(tags.building) || tags.amenity || tags.shop || tags.office) jobs += area
+    else {
+      res += area * 0.5
+      jobs += area * 0.5
+    }
+  }
+  return { residents: Math.round(res / M2_PER_RESIDENT), jobs: Math.round(jobs / M2_PER_JOB) }
 }
 
 /** Выпуклая оболочка застройки района: алгоритм монотонной цепочки. */

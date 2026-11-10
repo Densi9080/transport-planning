@@ -15,6 +15,8 @@ const PART_TIRE = 2
 const PART_TAIL = 3
 const PART_HEAD = 4
 const PART_SHADOW = 5
+const PART_TRIM = 6
+const PART_RIM = 7
 
 const INSTANCE_FLOATS = 11
 const MIN_EXAGGERATE_ZOOM = 16.5
@@ -69,48 +71,113 @@ function pushBox(
   pushQuad(mesh, b(x[1], y[0]), b(x[1], y[1]), t(tx[1], ty[1]), t(tx[1], ty[0]), part)
 }
 
+function pushTri(mesh: MeshBuilder, a: number[], b: number[], c: number[], part: number): void {
+  const ux = b[0]! - a[0]!
+  const uy = b[1]! - a[1]!
+  const uz = b[2]! - a[2]!
+  const vx = c[0]! - a[0]!
+  const vy = c[1]! - a[1]!
+  const vz = c[2]! - a[2]!
+  let nx = uy * vz - uz * vy
+  let ny = uz * vx - ux * vz
+  let nz = ux * vy - uy * vx
+  const length = Math.hypot(nx, ny, nz) || 1
+  nx /= length
+  ny /= length
+  nz /= length
+  for (const point of [a, b, c]) mesh.data.push(point[0]!, point[1]!, point[2]!, nx, ny, nz, part)
+}
+
+/**
+ * Кузов по боковому профилю: выпуклый многоугольник (y — вдоль машины, z — высота) против часовой
+ * стрелки, вытянутый поперёк на ширину. Так получаются скошенные капот, лобовое и багажник.
+ */
+function pushProfile(mesh: MeshBuilder, profile: [number, number][], halfWidth: number, part: number): void {
+  const right = profile.map(([y, z]) => [halfWidth, y, z])
+  const left = profile.map(([y, z]) => [-halfWidth, y, z])
+  for (let i = 1; i < profile.length - 1; i++) {
+    pushTri(mesh, right[0]!, right[i]!, right[i + 1]!, part)
+    pushTri(mesh, left[0]!, left[i + 1]!, left[i]!, part)
+  }
+  for (let i = 0; i < profile.length; i++) {
+    const j = (i + 1) % profile.length
+    pushQuad(mesh, right[i]!, left[i]!, left[j]!, right[j]!, part)
+  }
+}
+
+/** Колесо: эллиптический цилиндр поперёк машины (масштаб по осям у кузова разный). */
+function pushWheel(mesh: MeshBuilder, y: number, radiusY: number, radiusZ: number, x0: number, x1: number): void {
+  const segments = 12
+  const point = (x: number, k: number) => {
+    const angle = (k / segments) * Math.PI * 2
+    return [x, y + Math.cos(angle) * radiusY, radiusZ + Math.sin(angle) * radiusZ]
+  }
+  const hub = (x: number) => [x, y, radiusZ]
+  for (let k = 0; k < segments; k++) {
+    pushQuad(mesh, point(x0, k), point(x1, k), point(x1, k + 1), point(x0, k + 1), PART_TIRE)
+    pushTri(mesh, hub(x1), point(x1, k), point(x1, k + 1), PART_RIM)
+    pushTri(mesh, hub(x0), point(x0, k + 1), point(x0, k), PART_RIM)
+  }
+}
+
 function pushShadow(mesh: MeshBuilder): void {
   const e = 0.56
   pushQuad(mesh, [-e, -e, 0.005], [e, -e, 0.005], [e, e, 0.005], [-e, e, 0.005], PART_SHADOW)
 }
 
-function pushWheels(mesh: MeshBuilder, front: number, back: number): void {
-  for (const x of [-0.52, 0.42]) {
-    for (const y of [front, back]) {
-      pushBox(mesh, [x, x + 0.1], [y - 0.07, y + 0.07], [0, 0.22], PART_TIRE)
-    }
-  }
-}
-
+/** Легковая машина, размеры в долях: x — ширина, y — длина (вперёд +), z — высота. */
 function carMesh(): number[] {
   const mesh: MeshBuilder = { data: [] }
   pushShadow(mesh)
-  pushWheels(mesh, 0.31, -0.31)
-  // Кузов и более низкий капот
-  pushBox(mesh, [-0.5, 0.5], [-0.5, 0.26], [0.14, 0.58], PART_BODY)
-  pushBox(mesh, [-0.5, 0.5], [0.26, 0.5], [0.14, 0.5], PART_BODY, { y: [0.26, 0.47] })
-  // Кабина: стёкла со скошенными стойками и крыша
-  pushBox(mesh, [-0.46, 0.46], [-0.42, 0.22], [0.58, 0.95], PART_GLASS, { x: [-0.4, 0.4], y: [-0.31, 0.05] })
-  pushBox(mesh, [-0.41, 0.41], [-0.32, 0.06], [0.95, 1], PART_BODY)
+  // Колёса: радиус около 0,32 м при машине 4,5 × 1,8 × 1,5 м
+  for (const y of [0.31, -0.3]) {
+    pushWheel(mesh, y, 0.072, 0.21, 0.4, 0.5)
+    pushWheel(mesh, y, 0.072, 0.21, -0.5, -0.4)
+  }
+  // Нижняя часть кузова: бампер, капот, багажник
+  pushProfile(
+    mesh,
+    [[-0.5, 0.14], [0.5, 0.14], [0.5, 0.34], [0.47, 0.43], [0.22, 0.51], [-0.31, 0.53], [-0.46, 0.49], [-0.5, 0.41]],
+    0.49,
+    PART_BODY,
+  )
+  // Тёмный пояс бамперов и порогов
+  pushBox(mesh, [-0.5, 0.5], [-0.505, 0.505], [0.12, 0.2], PART_TRIM)
+  // Кабина: стёкла со скошенными стойками, крыша чуть уже
+  pushBox(mesh, [-0.44, 0.44], [-0.31, 0.21], [0.5, 0.86], PART_GLASS, { x: [-0.37, 0.37], y: [-0.19, 0.05] })
+  pushBox(mesh, [-0.375, 0.375], [-0.195, 0.055], [0.86, 0.9], PART_BODY, { x: [-0.35, 0.35], y: [-0.17, 0.04] })
+  // Зеркала
+  pushBox(mesh, [0.49, 0.56], [0.15, 0.19], [0.5, 0.56], PART_BODY)
+  pushBox(mesh, [-0.56, -0.49], [0.15, 0.19], [0.5, 0.56], PART_BODY)
   // Фары и стоп-сигналы
-  pushBox(mesh, [-0.46, -0.2], [-0.505, -0.49], [0.38, 0.52], PART_TAIL)
-  pushBox(mesh, [0.2, 0.46], [-0.505, -0.49], [0.38, 0.52], PART_TAIL)
-  pushBox(mesh, [-0.46, -0.2], [0.49, 0.505], [0.3, 0.42], PART_HEAD)
-  pushBox(mesh, [0.2, 0.46], [0.49, 0.505], [0.3, 0.42], PART_HEAD)
+  pushBox(mesh, [-0.44, -0.2], [0.495, 0.508], [0.26, 0.33], PART_HEAD)
+  pushBox(mesh, [0.2, 0.44], [0.495, 0.508], [0.26, 0.33], PART_HEAD)
+  pushBox(mesh, [-0.46, -0.22], [-0.508, -0.495], [0.31, 0.39], PART_TAIL)
+  pushBox(mesh, [0.22, 0.46], [-0.508, -0.495], [0.31, 0.39], PART_TAIL)
   return mesh.data
 }
 
+/** Автобус и троллейбус: длинный кузов с ленточным остеклением и большим лобовым стеклом. */
 function bigMesh(): number[] {
   const mesh: MeshBuilder = { data: [] }
   pushShadow(mesh)
-  pushWheels(mesh, 0.32, -0.3)
-  pushBox(mesh, [-0.5, 0.5], [-0.5, 0.5], [0.1, 0.97], PART_BODY)
-  pushBox(mesh, [-0.505, 0.505], [-0.46, 0.46], [0.5, 0.82], PART_GLASS)
-  pushBox(mesh, [-0.42, 0.42], [0.49, 0.507], [0.45, 0.88], PART_GLASS)
-  pushBox(mesh, [-0.46, -0.24], [-0.507, -0.49], [0.18, 0.3], PART_TAIL)
-  pushBox(mesh, [0.24, 0.46], [-0.507, -0.49], [0.18, 0.3], PART_TAIL)
-  pushBox(mesh, [-0.46, -0.24], [0.49, 0.507], [0.16, 0.26], PART_HEAD)
-  pushBox(mesh, [0.24, 0.46], [0.49, 0.507], [0.16, 0.26], PART_HEAD)
+  // Радиус колеса 0,5 м при автобусе 12 × 2,5 × 3,2 м
+  for (const y of [0.33, -0.27]) {
+    pushWheel(mesh, y, 0.042, 0.155, 0.42, 0.5)
+    pushWheel(mesh, y, 0.042, 0.155, -0.5, -0.42)
+  }
+  pushBox(mesh, [-0.5, 0.5], [-0.5, 0.5], [0.09, 0.95], PART_BODY, { x: [-0.47, 0.47], y: [-0.49, 0.485] })
+  pushBox(mesh, [-0.505, 0.505], [-0.505, 0.505], [0.09, 0.17], PART_TRIM)
+  // Окна по бортам, лобовое и заднее стекло
+  pushBox(mesh, [-0.497, 0.497], [-0.44, 0.4], [0.47, 0.83], PART_GLASS, { x: [-0.484, 0.484] })
+  pushBox(mesh, [-0.44, 0.44], [0.49, 0.497], [0.3, 0.88], PART_GLASS)
+  pushBox(mesh, [-0.4, 0.4], [-0.497, -0.489], [0.56, 0.86], PART_GLASS)
+  // Блок кондиционера на крыше
+  pushBox(mesh, [-0.3, 0.3], [-0.22, 0.12], [0.95, 1], PART_BODY, { x: [-0.27, 0.27], y: [-0.2, 0.1] })
+  pushBox(mesh, [-0.44, -0.22], [0.497, 0.508], [0.16, 0.25], PART_HEAD)
+  pushBox(mesh, [0.22, 0.44], [0.497, 0.508], [0.16, 0.25], PART_HEAD)
+  pushBox(mesh, [-0.46, -0.26], [-0.508, -0.497], [0.18, 0.3], PART_TAIL)
+  pushBox(mesh, [0.26, 0.46], [-0.508, -0.497], [0.18, 0.3], PART_TAIL)
   return mesh.data
 }
 
@@ -136,23 +203,32 @@ void main() {
   gl_Position = uMatrix * vec4(world, 1.0);
 
   vec3 sun = normalize(vec3(0.45, -0.35, 0.85));
-  float light = 0.52 + 0.48 * max(dot(normal, sun), 0.0);
+  float diffuse = max(dot(normal, sun), 0.0);
+  float light = 0.46 + 0.54 * diffuse;
+  // Низ кузова в тени: машина «стоит» на дороге, а не висит над ней
+  float occlusion = mix(0.72, 1.0, smoothstep(0.1, 0.55, aPosition.z));
   float part = aPart + 0.5;
   vec3 color;
   vAlpha = 1.0;
   if (part < 1.0) {
-    color = iColor.rgb * light;
+    // Кузов: рассеянный свет и мягкий блик на горизонтальных поверхностях
+    color = iColor.rgb * light * occlusion + vec3(0.1) * pow(max(normal.z, 0.0), 6.0);
   } else if (part < 2.0) {
-    color = vec3(0.07, 0.09, 0.12) + vec3(0.16, 0.2, 0.26) * pow(max(normal.z, 0.0), 2.0);
+    // Стекло тёмное с отражением неба сверху
+    color = vec3(0.06, 0.08, 0.11) + vec3(0.18, 0.23, 0.3) * pow(max(normal.z, 0.0), 1.5) + vec3(0.05) * diffuse;
   } else if (part < 3.0) {
-    color = vec3(0.04);
+    color = vec3(0.035) + vec3(0.03) * diffuse;
   } else if (part < 4.0) {
     color = mix(vec3(0.34, 0.03, 0.04), vec3(1.0, 0.1, 0.08), iColor.a);
   } else if (part < 5.0) {
     color = vec3(0.95, 0.93, 0.78);
-  } else {
+  } else if (part < 6.0) {
     color = vec3(0.0);
     vAlpha = 0.34;
+  } else if (part < 7.0) {
+    color = vec3(0.1, 0.105, 0.115) * light;
+  } else {
+    color = vec3(0.55, 0.57, 0.6) * light;
   }
   vColor = color;
 }`

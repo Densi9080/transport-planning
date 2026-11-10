@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<additional>
+  <!-- Фазы светофоров из редактора. Сеть: Eclipse SUMO netconvert 1.28.0, настройки по умолчанию. Запуск: sumo -n сеть.net.xml -a этот_файл.add.xml -->
+  <tlLogic id="1498865642" type="static" programID="editor" offset="0">
+    <phase duration="40" state="GGgGgg" />
+    <phase duration="3" state="yyyyyy" />
+    <phase duration="2" state="rrrrrr" />
+    <phase duration="13" state="rrrrrr" />
+    <phase duration="3" state="rrrrrr" />
+    <phase duration="2" state="rrrrrr" />
+  </tlLogic>
+  <tlLogic id="1872643965" type="static" programID="editor" offset="0">
+    <phase duration="40" state="ggGG" />
+    <phase duration="3" state="yyyy" />
+    <phase duration="2" state="rrrr" />
+    <phase duration="13" state="rrrr" />
+    <phase duration="3" state="rrrr" />
+    <phase duration="2" state="rrrr" />
+  </tlLogic>
+</additional>

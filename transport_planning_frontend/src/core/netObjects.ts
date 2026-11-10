@@ -80,7 +80,12 @@ export function customObjectTags(type: CustomObject, wayId: number): Tags {
   return { [TP_TYPE]: meta.value, [TP_WAY]: String(wayId), ...meta.defaults }
 }
 
+/**
+ * Пункт остановки — место на дороге. Знак highway=bus_stop с public_transport=platform стоит
+ * у обочины: по схеме PTv2 это платформа (зона), а не пункт, иначе одна остановка считалась бы дважды.
+ */
 function isStopPointTags(tags: Tags | undefined): boolean {
+  if (tags?.public_transport === 'platform') return false
   return tags?.public_transport === 'stop_position' || tags?.highway === 'bus_stop' || tags?.railway === 'tram_stop' || tags?.railway === 'stop'
 }
 

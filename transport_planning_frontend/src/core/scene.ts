@@ -37,11 +37,14 @@ import {
   type Link,
   type Network,
   restrictionsAt,
+  restrictionVias,
   connectivityAt,
   type TurnKind,
   turnKind,
 } from './topology'
+import { parseAreaKey, STOP_AREA_TAG } from './stops'
 import { reducedSections, SECTION_SPEEDS } from './traffic'
+import { placeSigns } from './trafficSigns'
 import type { OWay, XY } from './types'
 
 export type SceneLayer =
@@ -79,6 +82,8 @@ const COLLINEAR_COS = -0.92
 const LANE_ARROW_INTERVAL_M = 70
 const LANE_ARROW_FROM_END_M = 7
 const ZEBRA_STRIPE_M = 0.55
+/** Платформа и её пункт на дороге — одна остановка: разметка рисуется один раз. */
+const STOP_ZIGZAG_DEDUPE_M = 40
 const ZEBRA_GAP_M = 0.65
 const ZEBRA_DEPTH_M = 3.2
 const HALF_LANE_M = 1.75
@@ -400,10 +405,14 @@ function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags
   return kinds.has('left') ? [] : [0]
 }
 
-function outLaneFor(index: number, usedCount: number, outCount: number, kind: TurnKind): number {
+/**
+ * Полоса выезда для index-й из usedCount полос манёвра, по ПДД 8.6: направо — в крайнюю правую
+ * и соседние с ней, налево и в разворот — в крайнюю левую и соседние, то есть всегда в ближнюю.
+ */
+export function outLaneFor(index: number, usedCount: number, outCount: number, kind: TurnKind): number {
   if (outCount <= 1) return 0
   if (kind === 'right') return outCount - 1 - Math.min(usedCount - 1 - index, outCount - 1)
-  if (kind === 'left') return Math.min(index, outCount - 1)
+  if (kind === 'left' || kind === 'reverse') return Math.min(index, outCount - 1)
   const shift = outCount - usedCount
   return Math.max(0, Math.min(outCount - 1, index + Math.max(0, shift)))
 }
@@ -533,6 +542,38 @@ export function junctionConnectors(
 }
 
 /**
+ * Манёвры, закрытые запретом поворота (type=restriction). Соединений полос у них нет, поэтому
+ * без отдельной отрисовки запрет на карте не виден: манёвр просто пропадал. Траектория идёт
+ * от середины полос подхода к середине полос выезда; разворот не рисуем — для него есть знак.
+ */
+export function forbiddenTurns(
+  doc: OsmDoc,
+  node: number,
+  arms: Arm[],
+  geometries: Map<Arm, ArmGeometry>,
+): { from: number; to: number; kind: TurnKind; points: XY[] }[] {
+  const restrictions = restrictionsAt(doc, node)
+  if (!restrictions.length) return []
+  const result: { from: number; to: number; kind: TurnKind; points: XY[] }[] = []
+  for (const from of arms) {
+    if (from.lanesIn === 0 || !restrictions.some((r) => r.from === from.link.wayId)) continue
+    for (const to of arms) {
+      if (to.lanesOut === 0 || to.neighbor === from.neighbor) continue
+      if (isMovementAllowed(from, to, restrictions)) continue
+      const kind = turnKind(from, to, arms)
+      if (kind === 'reverse') continue
+      const fromGeometry = geometries.get(from)
+      const toGeometry = geometries.get(to)
+      if (!fromGeometry || !toGeometry) continue
+      const start = lanePoint(fromGeometry, Math.floor((from.lanesIn - 1) / 2), true)
+      const end = lanePoint(toGeometry, Math.floor((to.lanesOut - 1) / 2), false)
+      result.push({ from: from.neighbor, to: to.neighbor, kind, points: turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir) })
+    }
+  }
+  return result
+}
+
+/**
  * Номер цвета для каждого подхода к узлу. Север, восток, юг и запад всегда одного цвета по всему городу,
  * а если два подхода попали в одну сторону, второй получает ближайший свободный цвет.
  */
@@ -577,51 +618,78 @@ export function armsByLink(network: Network): Map<Link, { start?: Arm; end?: Arm
   return result
 }
 
-function zebra(
-  center: XY,
-  dir: XY,
-  width: number,
+/** Где проходит дорога в точке перехода: середина проезжей части, её направление и ширина. */
+interface RoadAt {
+  point: XY
+  dir: XY
+  width: number
+  wayId: number
+}
+
+/** Переход почти вдоль дороги — ошибка рисования; рисуем его не острее этого угла, чтобы зебра не растягивалась на десятки метров. */
+const MIN_CROSSING_SIN = Math.sin((25 * Math.PI) / 180)
+const BAND_MARGIN_M = 0.4
+
+/**
+ * Разметка 1.14.1 на проезжей части. Полосы зебры идут вдоль дороги, как на асфальте, их шаг
+ * меряется поперёк дороги, а сама полоса перехода может идти под углом (axis): тогда каждая
+ * полоса — параллелограмм, а вся зебра ровно от кромки до кромки, без выхода на тротуар.
+ * Под полосами — подложка band: на мелком масштабе полос не видно, а переход должен читаться.
+ */
+function crossingMarking(
+  road: RoadAt,
+  axisIn: XY,
+  marked: boolean,
   wayId: number,
   node: number,
   output: Feature[],
   projector: Projector,
 ): void {
-  const normal = leftNormal(dir)
-  const halfDepth = ZEBRA_DEPTH_M / 2
+  const normal = leftNormal(road.dir)
+  let axis = unit(axisIn)
+  if (dot(axis, normal) < 0) axis = scale(axis, -1)
+  let sin = dot(axis, normal)
+  if (sin < MIN_CROSSING_SIN) {
+    // Сохраняем сторону наклона, но не даём переходу лечь вдоль дороги
+    const along = dot(axis, road.dir) >= 0 ? 1 : -1
+    const cos = Math.sqrt(1 - MIN_CROSSING_SIN ** 2)
+    axis = add(scale(normal, MIN_CROSSING_SIN), scale(road.dir, along * cos))
+    sin = MIN_CROSSING_SIN
+  }
+  const at = (across: number, alongRoad: number): XY => add(add(road.point, scale(axis, across / sin)), scale(road.dir, alongRoad))
+  const half = road.width / 2
+  const bandDepth = ZEBRA_DEPTH_M / 2 + BAND_MARGIN_M
+  output.push(
+    polygonFeature([at(-half, -bandDepth), at(half, -bandDepth), at(half, bandDepth), at(-half, bandDepth)], projector, {
+      wayId,
+      node,
+      kind: 'band',
+    }),
+  )
+  // Ось перехода на мелком масштабе, где и подложки ещё не разглядеть
+  output.push(lineFeature([at(-half, 0), at(half, 0)], projector, { wayId, node, kind: 'axis' }))
+  if (!marked) return
   const step = ZEBRA_STRIPE_M + ZEBRA_GAP_M
-  const count = Math.floor(width / step)
+  const count = Math.floor((road.width - ZEBRA_GAP_M) / step)
   const start = -((count - 1) * step) / 2
+  const halfStripe = ZEBRA_STRIPE_M / 2
+  const halfDepth = ZEBRA_DEPTH_M / 2
   for (let i = 0; i < count; i++) {
-    const c = add(center, scale(normal, start + i * step))
-    const halfStripe = scale(normal, ZEBRA_STRIPE_M / 2)
-    const halfLength = scale(dir, halfDepth)
+    const c = start + i * step
     output.push(
       polygonFeature(
-        [
-          add(add(c, halfStripe), halfLength),
-          add(sub(c, halfStripe), halfLength),
-          sub(sub(c, halfStripe), halfLength),
-          sub(add(c, halfStripe), halfLength),
-        ],
+        [at(c - halfStripe, -halfDepth), at(c + halfStripe, -halfDepth), at(c + halfStripe, halfDepth), at(c - halfStripe, halfDepth)],
         projector,
-        { wayId, node },
+        { wayId, node, kind: 'stripe' },
       ),
     )
   }
 }
 
-/** Зебра по заданной линии: начало и конец ставит пользователь, поэтому переход может идти под углом к дороге. */
-function zebraBetween(a: XY, b: XY, roadDir: XY, wayId: number, output: Feature[], projector: Projector): void {
-  const axis = unit(sub(b, a))
-  const length = dist(a, b)
-  const step = ZEBRA_STRIPE_M + ZEBRA_GAP_M
-  const count = Math.floor(length / step)
-  const halfStripe = scale(axis, ZEBRA_STRIPE_M / 2)
-  const halfLength = scale(roadDir, ZEBRA_DEPTH_M / 2)
-  for (let i = 0; i < count; i++) {
-    const c = add(a, scale(axis, step * (i + 0.5)))
-    output.push(polygonFeature([add(add(c, halfStripe), halfLength), add(sub(c, halfStripe), halfLength), sub(sub(c, halfStripe), halfLength), sub(add(c, halfStripe), halfLength)], projector, { wayId }))
-  }
+/** Нерегулируемый переход без зебры: только подложка и ось. */
+function isMarked(tags: Record<string, string> | undefined): boolean {
+  const value = tags?.crossing
+  return value !== 'unmarked' && value !== 'no' && tags?.['crossing:markings'] !== 'no'
 }
 
 function buildCrossings(
@@ -632,34 +700,52 @@ function buildCrossings(
   projector: Projector,
 ): void {
   const seenSignal = new Set<number>()
-  const crossingDirs = new Map<number, XY>()
+  const crossingWays = [...doc.ways.values()].filter((way) => way.tags?.footway === 'crossing' && way.nds.length >= 2)
+  const onCrossingWay = new Set(crossingWays.flatMap((way) => way.nds))
+  /** Узел дороги → её положение там. В узле развязки дорог несколько, выбор потом по углу. */
+  const roadsAt = new Map<number, RoadAt[]>()
   for (const link of network.links) {
-    const nodes = link.nodes
-    nodes.forEach((id, index) => {
+    let along = 0
+    link.nodes.forEach((id, index) => {
+      if (index > 0) along += dist(link.points[index - 1]!, link.points[index]!)
       const tags = doc.nodes.get(id)?.tags
-      if (!tags?.highway) return
-      if (tags.highway !== 'crossing' && tags.highway !== 'traffic_signals') return
-      let along = 0
-      for (let i = 1; i <= index; i++) along += dist(link.points[i - 1]!, link.points[i]!)
+      const tagged = tags?.highway === 'crossing' || tags?.highway === 'traffic_signals' || !!tags?.crossing
+      if (!tagged && !onCrossingWay.has(id)) return
       const { point, dir } = pointAlong(link.points, along)
-      const hasOwnLine = doc.waysOfNode(id).some((wayId) => doc.ways.get(wayId)?.tags?.footway === 'crossing')
-      if (hasOwnLine) {
-        crossingDirs.set(id, dir)
-      } else if (tags.highway === 'crossing' || tags.crossing) {
-        zebra(point, dir, totalWidth(link.profile), link.wayId, id, crossings, projector)
-      }
-      if (tags.highway === 'traffic_signals' && !seenSignal.has(id)) {
+      const road: RoadAt = { point, dir, width: totalWidth(link.profile), wayId: link.wayId }
+      roadsAt.set(id, [...(roadsAt.get(id) ?? []), road])
+      if (tags?.highway === 'traffic_signals' && !seenSignal.has(id)) {
         seenSignal.add(id)
         signals.push(pointFeature(point, projector, { node: id }))
       }
     })
   }
-  for (const way of doc.ways.values()) {
-    if (way.tags?.footway !== 'crossing' || way.nds.length < 2) continue
-    const road = way.nds.map((id) => crossingDirs.get(id)).find(Boolean)
-    const first = projector.toXY(doc.node(way.nds[0]!))
-    const last = projector.toXY(doc.node(way.nds.at(-1)!))
-    if (road) zebraBetween(first, last, road, way.id, crossings, projector)
+  const drawn = new Set<number>()
+  // Переход своей линией: зебра на каждой проезжей части, которую линия пересекает, по её углу
+  for (const way of crossingWays) {
+    way.nds.forEach((id, index) => {
+      const roads = roadsAt.get(id)
+      if (!roads || drawn.has(id)) return
+      const prev = projector.toXY(doc.node(way.nds[Math.max(0, index - 1)]!))
+      const next = projector.toXY(doc.node(way.nds[Math.min(way.nds.length - 1, index + 1)]!))
+      const axis = sub(next, prev)
+      if (Math.hypot(axis.x, axis.y) < 0.01) return
+      const direction = unit(axis)
+      const road = roads.reduce((best, item) =>
+        Math.abs(cross(item.dir, direction)) > Math.abs(cross(best.dir, direction)) ? item : best,
+      )
+      drawn.add(id)
+      crossingMarking(road, direction, isMarked({ ...way.tags, ...doc.nodes.get(id)?.tags }), way.id, id, crossings, projector)
+    })
+  }
+  // Переход только точкой на дороге: поперёк неё
+  for (const [id, roads] of roadsAt) {
+    if (drawn.has(id)) continue
+    const tags = doc.nodes.get(id)?.tags
+    if (tags?.highway !== 'crossing' && !tags?.crossing) continue
+    const road = roads[0]!
+    drawn.add(id)
+    crossingMarking(road, leftNormal(road.dir), isMarked(tags), road.wayId, id, crossings, projector)
   }
   for (const node of doc.nodes.values()) {
     if (node.tags?.highway === 'traffic_signals' && !seenSignal.has(node.id)) {
@@ -668,7 +754,12 @@ function buildCrossings(
   }
 }
 
-function buildTrafficSigns(doc: OsmDoc, signs: Feature[], projector: Projector): void {
+function buildTrafficSigns(doc: OsmDoc, network: Network, signs: Feature[], projector: Projector): void {
+  // Знаки из тегов traffic_sign и выведенные из запретов поворота: картинку по номеру рисует карта
+  for (const sign of placeSigns(doc, network, projector)) {
+    const icon = `sign:${sign.code}${sign.value ? `[${sign.value}]` : ''}`
+    signs.push(pointFeature(sign.point, projector, { icon, code: sign.code, title: sign.title, derived: sign.derived, node: sign.node }))
+  }
   for (const node of doc.nodes.values()) {
     const tags = node.tags
     if (!tags) continue
@@ -748,6 +839,25 @@ function elevatedSegments(
   }
 }
 
+const BRIDGE_WING_M = 3
+
+/**
+ * Условный знак моста: у каждого конца края настила отгибаются наружу. Так мост читается
+ * мостом и сверху, даже когда под ним идёт дорога или тоннель того же цвета.
+ */
+function bridgeWings(axis: XY[], left: XY[], right: XY[], atStart: boolean, wayId: number, output: Feature[], projector: Projector): void {
+  const end = atStart ? axis[0]! : axis.at(-1)!
+  const inner = atStart ? axis[1]! : axis.at(-2)!
+  const away = unit(sub(end, inner))
+  for (const edge of [left, right]) {
+    const corner = atStart ? edge[0]! : edge.at(-1)!
+    const lateral = sub(corner, end)
+    if (Math.hypot(lateral.x, lateral.y) < 0.01) continue
+    const out = unit(add(scale(away, 0.75), scale(unit(lateral), 0.65)))
+    output.push(lineFeature([corner, add(corner, scale(out, BRIDGE_WING_M))], projector, { wayId, level: 1, kind: 'wing' }))
+  }
+}
+
 function graphRoadClass(highway: string): string {
   return highway.replace('_link', '')
 }
@@ -769,6 +879,8 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   const elevated = EMPTY()
 
   const geometries = computeArmGeometries(network)
+  // Запреты поворота есть у немногих узлов: остальные не проверяем, чтобы сцена строилась быстро
+  const restrictedVias = restrictionVias(doc)
   for (const [node, arms] of network.arms) {
     if (arms.length >= 2 && !isSeamless(arms)) {
       const ring = junctionRing(arms.map((arm) => geometries.get(arm)!))
@@ -784,6 +896,9 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       const nodeLevel = Math.max(...arms.map((arm) => levelOf(arm.link)))
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
         turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor, fromLane: connector.fromLane, level: nodeLevel }))
+      }
+      for (const forbidden of restrictedVias.has(node) ? forbiddenTurns(doc, node, arms, geometries) : []) {
+        turnPaths.push(lineFeature(forbidden.points, projector, { turn: forbidden.kind, node, forbidden: true, from: forbidden.from, to: forbidden.to, level: nodeLevel }))
       }
     } else if (arms.length === 2 && !isSeamless(arms)) {
       // Стык двух отрезков с разным сечением: без соединений полосы обрывались бы у площадки узла
@@ -808,14 +923,27 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     }
   }
 
+  // Разметка 1.17 у остановки: по пункту на дороге, а у платформы без пункта — по ней самой
+  const stopPositions = [...doc.nodes.values()].filter((node) => node.tags?.public_transport === 'stop_position').map((node) => projector.toXY(node))
   for (const node of doc.nodes.values()) {
     const tags = node.tags
     if (tags?.public_transport !== 'stop_position' && tags?.highway !== 'bus_stop') continue
-    const place = nearestRoadPlace(network, projector.toXY(node))
+    const at = projector.toXY(node)
+    if (tags.public_transport !== 'stop_position' && stopPositions.some((point) => dist(point, at) < STOP_ZIGZAG_DEDUPE_M)) continue
+    // Пункт лежит на оси дороги, и сторону по нему не понять: её подсказывает его платформа
+    const area = parseAreaKey(tags[STOP_AREA_TAG])
+    const platform = area?.kind === 'node' ? doc.nodes.get(area.id) : undefined
+    const place = nearestRoadPlace(network, platform ? projector.toXY(platform) : at)
     if (place) markings.push(stopZigzag(place.link, place.along, place.side, projector))
   }
 
   const linkArms = armsByLink(network)
+  /** Сколько поднятых отрезков сходится в узле: там, где поднят только один, кончается мост. */
+  const elevatedAtNode = new Map<number, number>()
+  for (const link of network.links) {
+    if (levelOf(link) <= 0) continue
+    for (const node of [link.nodes[0]!, link.nodes.at(-1)!]) elevatedAtNode.set(node, (elevatedAtNode.get(node) ?? 0) + 1)
+  }
 
   for (const link of network.links) {
     const { start, end } = linkArms.get(link) ?? {}
@@ -831,6 +959,10 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     const tags = doc.ways.get(link.wayId)?.tags ?? {}
     const highway = tags.highway ?? 'road'
     if (left.length < 2) continue
+    if (level > 0) {
+      if ((elevatedAtNode.get(link.nodes[0]!) ?? 0) <= 1) bridgeWings(trimmed, left, right, true, link.wayId, markings, projector)
+      if ((elevatedAtNode.get(link.nodes.at(-1)!) ?? 0) <= 1) bridgeWings(trimmed, left, right, false, link.wayId, markings, projector)
+    }
 
     surface.push(
       polygonFeature([...left, ...right.reverse()], projector, {
@@ -863,7 +995,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
   }
 
   buildCrossings(doc, network, crossings, signals, projector)
-  buildTrafficSigns(doc, trafficSigns, projector)
+  buildTrafficSigns(doc, network, trafficSigns, projector)
   buildLabels(network, labels, projector, doc)
   for (const way of doc.ways.values()) buildMinor(way, doc, projector, minor)
 
@@ -917,7 +1049,8 @@ export function buildStaticScene(doc: OsmDoc): StaticScene {
 
   for (const way of doc.ways.values()) {
     const tags = way.tags ?? {}
-    if (tags.highway) continue
+    // Контуры транспортных районов рисует свой слой
+    if (tags.highway || tags['tp:type'] === 'zone') continue
     const coordinates = way.nds
       .map((id) => doc.nodes.get(id))
       .filter((node): node is NonNullable<typeof node> => !!node)

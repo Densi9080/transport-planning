@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import { type Movement, type TurnKind } from '@/core/topology'
+import { outLaneFor } from '@/core/scene'
 import { readTurnAttrs, TURN_TSYS, type TurnAttrs } from '@/core/turnAttrs'
 import { useEditor } from '@/stores/editor'
 
@@ -50,8 +51,11 @@ function addLane(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (value === '' || !current.value) return
   const fromLane = Number(value)
-  // Выезд по умолчанию: полоса с тем же номером справа, но не дальше числа полос выезда
-  const toLane = Math.max(0, current.value.to.lanesOut - Math.min(inNumber(fromLane), current.value.to.lanesOut))
+  // Выезд — ближняя полоса по ходу манёвра, как у автоматических соединений: направо отсчёт
+  // от правого края, налево — от левого. Раньше всегда считали справа, и левый поворот с правой
+  // полосы уходил в дальнюю полосу выезда
+  const used = [...lanes.value.map((c) => c.fromLane), fromLane].sort((a, b) => a - b)
+  const toLane = outLaneFor(used.indexOf(fromLane), used.length, current.value.to.lanesOut, current.value.kind)
   editor.setTurnLane(fromLane, toLane, true)
   ;(event.target as HTMLSelectElement).value = ''
 }
