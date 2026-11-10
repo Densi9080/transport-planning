@@ -31,6 +31,7 @@
 ## Правила тегов
 
 - `netconvert` не читает `type=connectivity`, stop/give_way, traffic_calming, bridge/tunnel.
+- Приоритет на нерегулируемом перекрёстке SUMO берёт только из класса дороги `highway` (primary — 12, residential — 3) и геометрии. Проверено на netconvert 1.28 (10.11.2026): `highway=give_way`, `highway=stop` и `priority_road=designated` сеть не меняют. Смена класса меняет, в том числе для случая, когда главная поворачивает. При равных классах главной SUMO считает самую прямую пару подходов.
 - `crossing=traffic_signals` на узле дороги создаёт светофор в сети SUMO.
 - MATSim читает highway, lanes, maxspeed, oneway, junction и не читает отношения. `RU:urban` у него превращается в значение по типу дороги.
 - Держать `lanes` целым, `maxspeed` и `width` числом.
