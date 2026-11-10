@@ -10,6 +10,7 @@ import type { OWay, Tags } from '@/core/types'
 import { useEditor } from '@/stores/editor'
 
 import LaneEditor from './LaneEditor.vue'
+import LaneVolumes from './LaneVolumes.vue'
 import ProfileCards from './ProfileCards.vue'
 import StatCounter from './StatCounter.vue'
 import TagTable from './TagTable.vue'
@@ -327,6 +328,7 @@ function changeLayer(delta: number): void {
 
   <div v-else-if="tab === 'lanes'" class="section">
     <LaneEditor :tags="tags" @change="update($event, 'Манёвры полос')" />
+    <LaneVolumes :way="way" />
   </div>
 
   <div v-else class="section">

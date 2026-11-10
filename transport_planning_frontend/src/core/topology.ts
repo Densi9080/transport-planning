@@ -196,6 +196,16 @@ export function restrictionsAt(doc: OsmDoc, via: number): Restriction[] {
   return found
 }
 
+/** Узлы, через которые проходит хоть один запрет поворота: один проход по отношениям. */
+export function restrictionVias(doc: OsmDoc): Set<number> {
+  const vias = new Set<number>()
+  for (const relation of doc.relations.values()) {
+    if (relation.tags?.type !== 'restriction') continue
+    for (const [type, ref, role] of relation.members) if (type === 'node' && role === 'via') vias.add(ref)
+  }
+  return vias
+}
+
 /** Разрешён ли манёвр по отношениям type=restriction. Проверяется только запрет, не наличие полос. */
 export function isMovementAllowed(inArm: Arm, outArm: Arm, restrictions: Restriction[]): boolean {
   const uTurn = inArm.neighbor === outArm.neighbor

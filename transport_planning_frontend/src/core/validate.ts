@@ -3,8 +3,10 @@ import { maxSlopePercent } from './elevation'
 import { dist, nearestOnSegment, Projector, segmentsCross } from './geo'
 import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
-import { buildNetwork, wayLevel } from './topology'
+import { checkHiddenUturns, checkMissingOneway, checkRestrictionBypass, checkTransitRoutes } from './networkChecks'
 import { junctionPriority } from './priority'
+import { bindPlatform, unboundPlatforms } from './stopBinding'
+import { buildNetwork, wayLevel } from './topology'
 import { buildStopHierarchy, stopIssues } from './stops'
 import type { LatLon, ORelation, OWay, XY } from './types'
 
@@ -31,6 +33,12 @@ export type IssueCode =
   | 'lane_change_mismatch'
   | 'stop_hierarchy'
   | 'priority_conflict'
+  | 'stop_unbound'
+  | 'hidden_uturn'
+  | 'restriction_bypass'
+  | 'transit_access'
+  | 'transit_against_oneway'
+  | 'missing_oneway'
 
 export interface Issue {
   id: string
@@ -65,6 +73,12 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
   stop_hierarchy: 'Иерархия остановок',
   priority_conflict: 'Приоритет на перекрёстке',
+  stop_unbound: 'Остановка не привязана к графу',
+  hidden_uturn: 'Разворот через короткий съезд',
+  restriction_bypass: 'Запрет обходится через соседний въезд',
+  transit_access: 'Маршрут ОТ по закрытой для него дороге',
+  transit_against_oneway: 'Маршрут ОТ против одностороннего движения',
+  missing_oneway: 'Вторая проезжая часть без oneway',
 }
 
 const BROKEN_JUNCTION_M = 4
@@ -125,6 +139,11 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkSlopes(context)
   checkStops(doc, projector, context.issues)
   checkPriority(doc, projector, context.issues)
+  const network = buildNetwork(doc, projector)
+  checkHiddenUturns(doc, network, context.issues)
+  checkRestrictionBypass(doc, network, context.issues)
+  checkTransitRoutes(doc, context.issues)
+  checkMissingOneway(doc, projector, ways, context.issues)
 
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   return context.issues.sort((a, b) => order[a.severity] - order[b.severity])
@@ -729,6 +748,25 @@ export function connectivityReport(doc: OsmDoc): ConnectivityReport {
 
 /** Пункт без зоны и остановка без пунктов — ошибки модели ОТ, остальное предупреждения. */
 function checkStops(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
+  // Платформа у обочины без пункта на дороге: автобус не знает, где на графе встать
+  for (const binding of unboundPlatforms(doc, projector)) {
+    const platform = doc.node(binding.platform)
+    const offRoad = binding.routesOffRoad.length
+    issues.push({
+      id: `stop-unbound-${binding.platform}`,
+      code: 'stop_unbound',
+      severity: 'warning',
+      message:
+        `Остановка «${binding.name || binding.platform}» есть только платформой у обочины, пункта на дороге нет. ` +
+        `Пункт встанет на дорогу ${binding.wayId} в ${Math.round(binding.distanceM)} м` +
+        (offRoad ? `; ${offRoad} маршр. идут по другой дороге, их проверьте вручную` : ''),
+      position: { lat: platform.lat, lon: platform.lon },
+      wayIds: [binding.wayId],
+      nodeIds: [binding.platform],
+      fixLabel: 'Поставить пункт на дорогу',
+      fix: () => bindPlatform(doc, projector, binding),
+    })
+  }
   const hierarchy = buildStopHierarchy(doc, projector)
   for (const issue of stopIssues(hierarchy)) {
     const { kind, id } = issue.target

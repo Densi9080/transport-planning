@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { type GeoJSONSource, Map as MlMap } from 'maplibre-gl'
+import { addProtocol, type GeoJSONSource, Map as MlMap } from 'maplibre-gl'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { isDrivable } from '@/core/lanes'
+import { registerEllipsoidMercator } from '@/map/ellipsoidMercator'
 import { BASEMAP_OPTIONS, basemapSource } from '@/map/style'
 import { useEditor } from '@/stores/editor'
 
 /** Снимок или схема рядом с графом. Камера синхронна с основной картой, поверх — тонкие оси дорог. */
 const editor = useEditor()
+registerEllipsoidMercator(addProtocol)
 const container = ref<HTMLDivElement | null>(null)
 let map: MlMap | null = null
 let ready = false
@@ -39,7 +41,7 @@ function applySource(): void {
   if (!ready || !map) return
   for (const id of ['compare-raster-2', 'compare-raster']) if (map.getLayer(id)) map.removeLayer(id)
   for (const id of ['compare-raster-2', 'compare-raster']) if (map.getSource(id)) map.removeSource(id)
-  const specs = basemapSource(source.value, editor.customTileUrl)
+  const specs = basemapSource(source.value, editor.customTileUrl, editor.customTileCrs)
   specs.forEach((spec, index) => {
     const id = index === 0 ? 'compare-raster' : 'compare-raster-2'
     map!.addSource(id, spec)
@@ -98,7 +100,7 @@ watch(() => editor.camera, (camera) => {
   map.jumpTo({ center: camera.center, zoom: camera.zoom, bearing: camera.bearing, pitch: camera.pitch })
   applyingCamera = false
 })
-watch(() => [source.value, editor.customTileUrl], applySource)
+watch(() => [source.value, editor.customTileUrl, editor.customTileCrs], applySource)
 watch(() => editor.rev, () => {
   ;(map?.getSource('axes') as GeoJSONSource | undefined)?.setData(axes())
 })

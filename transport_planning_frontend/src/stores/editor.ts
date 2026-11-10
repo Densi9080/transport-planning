@@ -4,7 +4,7 @@ import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
 import { computeHidden, type FilterLogic, type FilterMode, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
-import { nearestOnSegment, offsetPolyline, Projector, segmentsCross, smoothCurve } from '@/core/geo'
+import { dist, nearestOnSegment, offsetPolyline, Projector, segmentsCross, smoothCurve } from '@/core/geo'
 import {
   addNode,
   addWay,
@@ -55,7 +55,7 @@ import {
   type TransitMode,
 } from '@/core/transit'
 import type { LatLon, Tags, XY } from '@/core/types'
-import type { BasemapId, ThemeName } from '@/map/style'
+import { type BasemapId, guessTileCrs, type ThemeName, type TileCrs } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
 import { applyJunctionPriority, type PrioritySign } from '@/core/priority'
@@ -74,6 +74,9 @@ import {
   type StopHierarchy,
   withStopArea,
 } from '@/core/stops'
+import { bindPlatform, unboundPlatforms } from '@/core/stopBinding'
+import { createZone, JOBS_TAG, readUserZones, RESIDENTS_TAG } from '@/core/zones'
+import { estimateZonePopulation } from '@/sim/macro'
 
 export type Tool =
   | 'select'
@@ -96,6 +99,7 @@ export type Tool =
   | 'stopGroup'
   | 'pan'
   | 'delete'
+  | 'zone'
 
 /** Какие объекты сети выбираются щелчком: как активный тип объектов в Visum. */
 export type ActiveType = 'auto' | 'links' | 'nodes'
@@ -184,6 +188,7 @@ const VALIDATE_DELAY_MS = 350
 const TOAST_MS = 3500
 const WIDE_SCREEN_PX = 1100
 const TILE_URL_KEY = 'osm-editor-tile-url'
+const TILE_CRS_KEY = 'osm-editor-tile-crs'
 const THEME_KEY = 'osm-editor-theme-v2'
 const FILTER_KEY = 'osm-editor-filter:'
 const CRS_KEY = 'osm-editor-crs'
@@ -301,6 +306,9 @@ export const useEditor = defineStore('editor', () => {
   const modelOpacity = ref(1)
   const compareOpen = ref(false)
   const customTileUrl = ref(readStored(TILE_URL_KEY) ?? '')
+  /** Проекция своих тайлов: у Яндекса EPSG:3395, остальные почти все в EPSG:3857. */
+  const customTileCrs = ref<TileCrs>(readStored(TILE_CRS_KEY) === 'EPSG:3395' ? 'EPSG:3395' : 'EPSG:3857')
+  const basemapDialogOpen = ref(false)
   const imageUnderlay = shallowRef<ImageUnderlay | null>(null)
   /** Положение основной карты: от него зависит карта рядом и начальное место снимка. */
   const camera = shallowRef<CameraState | null>(null)
@@ -356,7 +364,12 @@ export const useEditor = defineStore('editor', () => {
   const navigatorOpen = ref(wideScreen)
   const inspectorOpen = ref(wideScreen)
 
-  watch(customTileUrl, (value) => writeStored(TILE_URL_KEY, value))
+  watch(customTileUrl, (value, previous) => {
+    writeStored(TILE_URL_KEY, value)
+    // Вставили адрес другого поставщика: проекцию подбираем по нему, вручную её можно поменять
+    if (guessTileCrs(value) !== guessTileCrs(previous)) customTileCrs.value = guessTileCrs(value)
+  })
+  watch(customTileCrs, (value) => writeStored(TILE_CRS_KEY, value))
   watch(crs, (value) => writeStored(CRS_KEY, value))
   // Один ползунок вместо двух: посередине видно и модель, и карту, к краям одно плавно уступает другому
   watch(mapBalance, (value) => {
@@ -771,7 +784,7 @@ export const useEditor = defineStore('editor', () => {
   }
 
   function setTool(next: Tool): void {
-    if (tool.value === 'road' && next !== 'road') drawPoints.value = []
+    if ((tool.value === 'road' || tool.value === 'zone') && next !== tool.value) drawPoints.value = []
     speedStart.value = null
     connectorFrom.value = null
     crossingStart.value = null
@@ -941,7 +954,11 @@ export const useEditor = defineStore('editor', () => {
     if (turn) mutate('Соединения полос по ПДД', (d) => resetLaneConnections(d, turn.node))
   }
 
-  /** Переход задаётся началом и концом, а его центр встаёт там, где линия пересекла дорогу. */
+  /**
+   * Переход задаётся началом и концом. На каждой проезжей части, которую пересекла линия, встаёт
+   * узел перехода: у дороги с разделительной полосой их два, и диагональный переход режет обе
+   * половины под своим углом.
+   */
   function finishCrossing(end: LatLon): void {
     const start = crossingStart.value
     const net = network.value
@@ -949,25 +966,31 @@ export const useEditor = defineStore('editor', () => {
     if (!start || !net || !p) return
     const a = p.toXY(start)
     const b = p.toXY(end)
-    let found: { wayId: number; point: XY } | null = null
+    const length = dist(a, b)
+    const hits: { wayId: number; point: XY; t: number }[] = []
     for (const link of net.links) {
-      for (let i = 1; i < link.points.length && !found; i++) {
+      for (let i = 1; i < link.points.length; i++) {
         const point = segmentsCross(a, b, link.points[i - 1]!, link.points[i]!)
-        if (point) found = { wayId: link.wayId, point }
+        if (!point) continue
+        const t = dist(a, point) / length
+        // Стык двух отрезков одной дороги даёт одно и то же пересечение дважды
+        if (!hits.some((hit) => hit.wayId === link.wayId && Math.abs(hit.t - t) * length < 0.5)) hits.push({ wayId: link.wayId, point, t })
       }
-      if (found) break
     }
-    if (!found) {
+    if (!hits.length) {
       toast('Линия перехода должна пересекать дорогу', 'error')
       return
     }
-    const road = found
+    hits.sort((x, y) => x.t - y.t)
     const id = mutate('Пешеходный переход', (d, proj) => {
       const first = addNode(d, start)
       const last = addNode(d, end)
-      const center = insertNodeOnWay(d, proj, road.wayId, proj.toLatLon(road.point))
-      setNodeTags(d, center, { ...(d.node(center).tags ?? {}), highway: 'crossing', crossing: 'marked' })
-      return addWay(d, [first, center, last], { highway: 'footway', footway: 'crossing', crossing: 'marked' })
+      const centers = hits.map((hit) => {
+        const center = insertNodeOnWay(d, proj, hit.wayId, proj.toLatLon(hit.point))
+        setNodeTags(d, center, { ...(d.node(center).tags ?? {}), highway: 'crossing', crossing: 'marked' })
+        return center
+      })
+      return addWay(d, [first, ...centers, last], { highway: 'footway', footway: 'crossing', crossing: 'marked' })
     })
     crossingStart.value = null
     if (id !== undefined) {
@@ -1113,6 +1136,26 @@ export const useEditor = defineStore('editor', () => {
    * Пункт ставится на дорогу. Как в Visum, он сразу входит в зону: в ближайшую,
    * а если рядом зоны нет — рядом с дорогой создаётся зона и остановка для неё.
    */
+  /** Все платформы у обочины получают пункт на дороге своего маршрута. */
+  function bindAllStops(): void {
+    const d = doc.value
+    const p = projector.value
+    if (!d || !p) return
+    const bindings = unboundPlatforms(d, p)
+    if (!bindings.length) {
+      toast('Все остановки уже привязаны к графу', 'success')
+      return
+    }
+    const offRoad = bindings.filter((binding) => binding.routesOffRoad.length > 0).length
+    mutate('Привязка остановок к графу', (dd, pp) => {
+      for (const binding of bindings) bindPlatform(dd, pp, binding)
+    })
+    toast(
+      `Пунктов на дороге поставлено: ${bindings.length}` + (offRoad ? `. У ${offRoad} часть маршрутов идёт по другой дороге — проверьте их` : ''),
+      offRoad ? 'info' : 'success',
+    )
+  }
+
   function addStopPoint(wayId: number, position: LatLon): void {
     const hierarchy = stopHierarchy.value
     const p = projector.value
@@ -1546,6 +1589,30 @@ export const useEditor = defineStore('editor', () => {
     pendingRoad.value = { points: drawPoints.value }
   }
 
+  /** Контур района замыкается сам; жители и рабочие места сразу оцениваются по застройке внутри. */
+  function finishZone(): void {
+    const points = drawPoints.value
+    const d = doc.value
+    const p = projector.value
+    if (!d || !p) return
+    if (points.length < 3) {
+      toast('Контур района: хотя бы три точки')
+      return
+    }
+    const polygon = points.map((point) => p.toXY(point))
+    const estimate = estimateZonePopulation(d, p, polygon)
+    const number = readUserZones(d, p).length + 1
+    const id = mutate('Новый район', (dd) =>
+      createZone(dd, points, { name: `Район ${number}`, [RESIDENTS_TAG]: String(estimate.residents), [JOBS_TAG]: String(estimate.jobs) }),
+    )
+    drawPoints.value = []
+    if (id !== undefined) {
+      selectOne({ kind: 'way', id })
+      inspectorOpen.value = true
+      toast(`Район добавлен: ${estimate.residents} жителей и ${estimate.jobs} рабочих мест по застройке. Числа можно поправить`, 'success')
+    }
+  }
+
   function cancelRoadDialog(): void {
     pendingRoad.value = null
   }
@@ -1679,6 +1746,8 @@ export const useEditor = defineStore('editor', () => {
     acceptsWay,
     placeNetObject,
     addStopPoint,
+    bindAllStops,
+    finishZone,
     addStopArea,
     addStopFromNode,
     listTab,
@@ -1719,6 +1788,8 @@ export const useEditor = defineStore('editor', () => {
     modelOpacity,
     compareOpen,
     customTileUrl,
+    customTileCrs,
+    basemapDialogOpen,
     imageUnderlay,
     camera,
     cameraRequest,

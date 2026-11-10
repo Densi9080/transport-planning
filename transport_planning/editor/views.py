@@ -14,7 +14,8 @@ from rest_framework.views import APIView
 from . import assistant
 from .models import Project
 from .osm_io import ChangesError, OsmFormatError, apply_changes, parse_document
-from .preflight import run_preflight
+from .preflight import find_netconvert, run_preflight
+from .sumo_signals import SignalExportError, SignalNetError, export_signal_programs, parse_groups
 from .traffic import TrafficError, run_traffic
 
 SAMPLE_NAME = 'example.osm'
@@ -124,6 +125,28 @@ class ProjectTrafficView(APIView):
         try:
             return Response(run_traffic(output, trips=trips, period=period))
         except TrafficError as exc:
+            return Response({'detail': str(exc)}, status=502)
+
+
+class ProjectSumoSignalsView(APIView):
+    """Фазы светофоров редактора отдельным файлом для SUMO. Привязка к сети строится по итоговому .osm."""
+
+    def post(self, request, pk):
+        project = get_object_or_404(Project, pk=pk)
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            output = apply_changes(project.read_original(), _changes_from_request(request))
+            groups = parse_groups(data.get('groups'))
+        except (ChangesError, OsmFormatError, SignalExportError) as exc:
+            return Response({'detail': str(exc)}, status=400)
+        if find_netconvert() is None:
+            return Response({
+                'available': False,
+                'message': 'Для привязки фаз к сети SUMO нужен netconvert: установите пакет eclipse-sumo или задайте SUMO_HOME.',
+            })
+        try:
+            return Response(export_signal_programs(output, groups))
+        except SignalNetError as exc:
             return Response({'detail': str(exc)}, status=502)
 
 

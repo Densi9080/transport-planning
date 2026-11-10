@@ -3,6 +3,7 @@ import { Combine, Merge, Sparkles, Spline, Trash2 } from 'lucide-vue-next'
 import { computed } from 'vue'
 
 import { customObjectOf } from '@/core/netObjects'
+import { isZoneWay } from '@/core/zones'
 import StopAreaInspector from './StopAreaInspector.vue'
 import StopInspector from './StopInspector.vue'
 import StopPointInspector from './StopPointInspector.vue'
@@ -17,6 +18,7 @@ import TurnInspector from './TurnInspector.vue'
 import RoadPresets from './RoadPresets.vue'
 import SimPanel from './SimPanel.vue'
 import WayInspector from './WayInspector.vue'
+import ZoneInspector from './ZoneInspector.vue'
 
 const editor = useEditor()
 const assistant = useAssistant()
@@ -47,6 +49,7 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
     <TurnInspector v-else-if="editor.selectedTurn" :key="`turn${editor.selectedTurn.node}-${editor.selectedTurn.from}`" />
     <StopInspector v-else-if="editor.selectedStop && ways.length + nodes.length === 0" :key="`stop${editor.selectedStop.id}`" />
     <StopAreaInspector v-else-if="isSingleWay && ways[0]!.tags?.public_transport === 'platform'" :key="`areaw${ways[0]!.id}`" kind="way" :id="ways[0]!.id" />
+    <ZoneInspector v-else-if="isSingleWay && isZoneWay(ways[0])" :key="`zone${ways[0]!.id}`" :way="ways[0]!" />
     <template v-else-if="isSingleWay">
       <LaneSection :way="ways[0]!" />
       <WayInspector :key="ways[0]!.id" :way="ways[0]!" />

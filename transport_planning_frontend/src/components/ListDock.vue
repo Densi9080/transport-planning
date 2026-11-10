@@ -85,7 +85,9 @@ const columnsByTab: Record<ListTab, Column[]> = {
   zones: [
     { key: '_id', label: 'Номер', numeric: true, width: '60px' },
     { key: 'name', label: 'Название' },
-    { key: 'kind', label: 'Тип', width: '110px' },
+    { key: 'kind', label: 'Тип', width: '130px' },
+    { key: 'residents', label: 'Жители', numeric: true, width: '80px' },
+    { key: 'jobs', label: 'Раб. места', numeric: true, width: '80px' },
     { key: 'production', label: 'Отправление, авт/ч', numeric: true, width: '120px' },
     { key: 'attraction', label: 'Прибытие, авт/ч', numeric: true, width: '110px' },
   ],
@@ -240,7 +242,9 @@ const rows = computed<Row[]>(() => {
       return (sim.macro?.zones ?? []).map((zone) => ({
         _id: zone.id,
         name: zone.label,
-        kind: zone.kind === 'gateway' ? 'Въезд на границе' : 'Район',
+        kind: zone.kind === 'gateway' ? 'Въезд на границе' : zone.userWay !== undefined ? 'Район (задан)' : 'Район по застройке',
+        residents: zone.residents ?? '',
+        jobs: zone.jobs ?? '',
         production: Math.round(zone.production),
         attraction: Math.round(zone.attraction),
       }))

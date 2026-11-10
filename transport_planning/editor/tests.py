@@ -9,9 +9,11 @@ from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase, override_settings
 
+from .models import Project
 from .osm_io import ChangesError, OsmFormatError, apply_changes, canonical_elements, parse_document
 
 SMALL = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -419,3 +421,85 @@ class TrafficTests(TestCase):
         self.assertEqual(result['stats']['loaded'], 50)
         self.assertGreater(len(result['lanes']), 0)
         self.assertGreaterEqual(len(result['lanes'][0]['shape']), 2)
+
+
+def _neighbors(data: bytes) -> dict[str, list[str]]:
+    return {way.get('id'): [nd.get('ref') for nd in way.findall('nd')] for way in ET.fromstring(data).findall('way')}
+
+
+class SumoSignalsTests(TestCase):
+    """Экспорт фаз в SUMO проверяется настоящими netconvert и sumo: только они знают номера соединений."""
+
+    def setUp(self):
+        from .preflight import find_netconvert
+
+        self.netconvert = find_netconvert()
+        if self.netconvert is None:
+            self.skipTest('SUMO не установлен')
+        self.data = (Path(settings.BASE_DIR) / 'samples' / 'example.osm').read_bytes()
+
+    def _group(self):
+        ways = _neighbors(self.data)
+        via = '1872643965'
+        main = f"{via}:{ways['1473925806'][-2]}>{ways['1228977331'][1]}"
+        pocket = f"{via}:{ways['863833210'][-2]}>{ways['1228977331'][1]}"
+        return {
+            'nodes': [int(via)],
+            'plan': {'offset': 10, 'yellow': 3, 'allRed': 2, 'phases': [{'green': 30}, {'green': 20}]},
+            'movements': {main: [0], pocket: [1]},
+        }
+
+    def test_plan_becomes_sumo_program_and_sumo_loads_it(self):
+        import subprocess
+
+        from .sumo_signals import export_signal_programs, parse_groups
+
+        result = export_signal_programs(self.data, parse_groups([self._group()]))
+        self.assertTrue(result['ok'])
+        self.assertEqual([item['id'] for item in result['written']], ['1872643965'])
+        # Остальные светофоры сети не входят в план редактора и остаются на программе SUMO
+        self.assertTrue(result['skipped'])
+        logic = ET.fromstring(result['xml'].encode()).find("tlLogic[@id='1872643965']")
+        phases = [(p.get('duration'), p.get('state')) for p in logic.findall('phase')]
+        # Соединения 0 и 1 идут из кармана, 2 и 3 — по главной; съезд из кармана без плана идёт со своим подходом
+        self.assertEqual(phases, [('30', 'rrGG'), ('3', 'rryy'), ('2', 'rrrr'), ('20', 'GGrr'), ('3', 'yyrr'), ('2', 'rrrr')])
+        # В редакторе момент цикла t + 10, в SUMO t − offset
+        self.assertEqual(logic.get('offset'), '50')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / 'map.osm').write_bytes(self.data)
+            subprocess.run([self.netconvert, '--osm-files', str(work / 'map.osm'), '-o', str(work / 'map.net.xml'), '--no-warnings'],
+                           check=True, capture_output=True)
+            (work / 'signals.add.xml').write_text(result['xml'], encoding='utf-8')
+            sumo = Path(self.netconvert).parent / ('sumo.exe' if os.name == 'nt' else 'sumo')
+            done = subprocess.run([str(sumo), '-n', str(work / 'map.net.xml'), '-a', str(work / 'signals.add.xml'), '-e', '120', '--no-step-log'],
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr[-500:])
+
+    def test_conflicting_greens_yield(self):
+        from .sumo_signals import export_signal_programs, parse_groups
+
+        group = self._group()
+        group['movements'] = {key: [0] for key in group['movements']}
+        result = export_signal_programs(self.data, parse_groups([group]))
+        state = ET.fromstring(result['xml'].encode()).find("tlLogic[@id='1872643965']/phase").get('state')
+        # Выезд из кармана уступает главной дороге, как в программе SUMO по умолчанию
+        self.assertEqual(state, 'ggGG')
+
+    def test_bad_groups_are_rejected_by_api(self):
+        project = Project(name='t.osm')
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        with override_settings(MEDIA_ROOT=media):
+            project.original.save('t.osm', ContentFile(SMALL), save=True)
+            url = f'/api/projects/{project.id}/sumo-signals/'
+            bad = self.client.post(url, {'changes': {}, 'groups': [{'nodes': [2], 'plan': {'phases': []}, 'movements': {}}]},
+                                   content_type='application/json')
+            self.assertEqual(bad.status_code, 400)
+            good = self.client.post(url, {'changes': {}, 'groups': [{
+                'nodes': [2], 'plan': {'offset': 0, 'yellow': 3, 'allRed': 2, 'phases': [{'green': 30}]},
+                'movements': {'2:1>3': [0], '2:3>1': [0]},
+            }]}, content_type='application/json')
+            self.assertEqual(good.status_code, 200)
+            self.assertIn('<tlLogic id="2"', good.json()['xml'])

@@ -5,6 +5,8 @@ import type {
   SourceSpecification,
 } from 'maplibre-gl'
 
+import { ellipsoidTileUrl } from './ellipsoidMercator'
+
 const EARTH_CIRCUMFERENCE_M = 40_075_016.686
 const WORLD_PX_AT_ZOOM_0 = 512
 
@@ -34,6 +36,7 @@ export const SOURCE_IDS = [
   'zoneAreas',
   'zoneLabels',
   'zoneLinks',
+  'userZones',
   'simJams',
   'simSignals',
   'other',
@@ -73,6 +76,9 @@ const APPROACH_COLOR: ExpressionSpecification = [
   APPROACH_COLORS[5]!,
 ]
 
+/** Подложка перехода: жёлтый ГОСТ Р 51256 для разметки 1.14.1 у детских учреждений. */
+export const CROSSING_BAND = '#f2c200'
+
 export const COLORS = {
   background: '#141518',
   building: '#37383c',
@@ -87,6 +93,7 @@ export const COLORS = {
   tunnel: '#22242a',
   bridge: '#34373d',
   bridgeEdge: '#c8ccd4',
+  bridgeOutline: '#050607',
   marking: '#d7dae0',
   through: '#2dd4bf',
   left: '#f59e0b',
@@ -196,13 +203,30 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'fill-color': ['match', ['coalesce', ['feature-state', 'los'], -1],
         0, LOS_COLORS[0]!, 1, LOS_COLORS[1]!, 2, LOS_COLORS[2]!, 3, LOS_COLORS[3]!, 4, LOS_COLORS[4]!, 5, LOS_COLORS[5]!,
         'rgba(0,0,0,0)'],
-      // Свободные дороги не спорят с пробками: заметнее всего то, что требует внимания
-      'fill-opacity': ['match', ['coalesce', ['feature-state', 'los'], -1], 0, 0.28, 1, 0.42, 2, 0.62, 3, 0.72, 4, 0.8, 5, 0.88, 0],
+      // Лёгкий оттенок: полосы и разметка под ним видны, а главное показывает линия sim-flow по кромке
+      'fill-opacity': ['match', ['coalesce', ['feature-state', 'los'], -1], 0, 0.06, 1, 0.1, 2, 0.16, 3, 0.22, 4, 0.28, 5, 0.34, 0],
     } },
-    { id: 'markings-edge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', ground, ['==', ['get', 'kind'], 'edge']], paint: {
+    // Уровень обслуживания тонкой линией вдоль кромки каждого направления, внутри проезжей части.
+    // Слой лежит на асфальте, ниже машин: иначе в 3D линия проходила бы поверх кузовов
+    { id: 'sim-flow', type: 'line', source: 'simBars', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': ['match', ['coalesce', ['feature-state', 'los'], -1],
+        0, LOS_COLORS[0]!, 1, LOS_COLORS[1]!, 2, LOS_COLORS[2]!, 3, LOS_COLORS[3]!, 4, LOS_COLORS[4]!, 5, LOS_COLORS[5]!,
+        'rgba(0,0,0,0)'],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 16, 2.5, 19, 4],
+      'line-offset': ['interpolate', ['linear'], ['zoom'], 13, -0.75, 16, -1.25, 19, -2],
+      'line-opacity': ['match', ['coalesce', ['feature-state', 'los'], -1], -1, 0, 0.95],
+    } },
+    { id: 'markings-edge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', ['==', ['get', 'level'], 0], ['==', ['get', 'kind'], 'edge']], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.14, 0.4),
       'line-opacity': 0.55,
+    } },
+    // Кромки тоннеля пунктиром, как на топографических картах: дорога идёт под землёй
+    { id: 'tunnel-edge', type: 'line', source: 'markings', minzoom: 14, filter: ['all', ['<', ['get', 'level'], 0], ['==', ['get', 'kind'], 'edge']], paint: {
+      'line-color': COLORS.marking,
+      'line-width': m(0.25, 0.8),
+      'line-opacity': 0.75,
+      'line-dasharray': [2, 1.5],
     } },
     { id: 'markings-divider', type: 'line', source: 'markings', minzoom: 15, filter: ['all', ground, ['==', ['get', 'kind'], 'divider']], paint: {
       'line-color': COLORS.marking,
@@ -240,40 +264,76 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },
-    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]], ['!', ['to-boolean', ['get', 'forbidden']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(3, 1.5),
       'line-opacity': 0.22,
     } },
-    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]], ['!', ['to-boolean', ['get', 'forbidden']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(0.3, 0.8),
       'line-opacity': 0.9,
+    } },
+    // Запрещённый манёвр: красный пунктир со знаком посередине; щелчок открывает его, как обычный поворот
+    { id: 'turn-forbidden', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['to-boolean', ['get', 'forbidden']], paint: {
+      'line-color': COLORS.error,
+      'line-width': m(0.35, 1.2),
+      'line-opacity': 0.85,
+      'line-dasharray': [2, 1.5],
+    } },
+    { id: 'turn-forbidden-sign', type: 'symbol', source: 'turnPaths', minzoom: 16.5, filter: ['to-boolean', ['get', 'forbidden']], layout: {
+      'symbol-placement': 'line-center',
+      'icon-image': ['match', ['get', 'turn'], 'left', 'sign:3.18.2', 'right', 'sign:3.18.1', 'sign:no-straight'],
+      'icon-rotation-alignment': 'viewport',
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 16.5, 0.35, 19, 0.6],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
     } },
     // Продолжение полос через стык двух отрезков выглядит как сама полоса
     { id: 'turn-continuation', type: 'line', source: 'turnPaths', minzoom: LANE_LINE_ZOOM, filter: ['all', groundSafe, ['to-boolean', ['get', 'continuation']]], layout: { 'line-cap': 'round' }, paint: {
       'line-color': COLORS.laneLine,
       'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
     } },
-    { id: 'crossings', type: 'fill', source: 'crossings', minzoom: 15, paint: {
-      'fill-color': '#e8e3cf',
-      'fill-opacity': 0.9,
+    // Переход: жёлто-белая зебра, как у школ, читается на сером асфальте в обеих темах.
+    // Издалека — жёлтая черта поперёк дороги, ближе — жёлтая подложка, вблизи на ней белые полосы
+    { id: 'crossings-axis', type: 'line', source: 'crossings', minzoom: 13, maxzoom: 15.5, filter: ['==', ['get', 'kind'], 'axis'], layout: { 'line-cap': 'butt' }, paint: {
+      'line-color': CROSSING_BAND,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 13, 2, 15.5, 5],
+    } },
+    { id: 'crossings-band', type: 'fill', source: 'crossings', minzoom: 15, filter: ['==', ['get', 'kind'], 'band'], paint: {
+      'fill-color': CROSSING_BAND,
+      'fill-opacity': 0.92,
+    } },
+    { id: 'crossings', type: 'fill', source: 'crossings', minzoom: 16.5, filter: ['==', ['get', 'kind'], 'stripe'], paint: {
+      'fill-color': '#ffffff',
+      'fill-opacity': ['interpolate', ['linear'], ['zoom'], 16.5, 0, 17.2, 1],
     } },
 
-    { id: 'bridge-casing', type: 'line', source: 'markings', filter: ['all', elevated, ['==', ['get', 'kind'], 'edge']], paint: {
-      'line-color': COLORS.bridgeEdge,
-      'line-width': m(0.5, 1.2),
+    // Мост поверх всего, что под ним: тень на нижнюю дорогу, тёмный контур, плотный настил,
+    // светлые перила и отогнутые края у концов. Нижняя дорога под настилом лишь угадывается
+    { id: 'bridge-shadow', type: 'fill', source: 'surface', filter: elevated, paint: {
+      'fill-color': '#000000',
+      'fill-opacity': 0.45,
+      'fill-translate': ['interpolate', ['linear'], ['zoom'], 14, ['literal', [1, 1.5]], 19, ['literal', [4, 6]]],
+      'fill-translate-anchor': 'viewport',
+    } },
+    { id: 'bridge-outline', type: 'line', source: 'markings', filter: ['all', elevated, ['in', ['get', 'kind'], ['literal', ['edge', 'wing']]]], layout: { 'line-cap': 'round' }, paint: {
+      'line-color': COLORS.bridgeOutline,
+      'line-width': m(1.2, 3),
     } },
     { id: 'surface-bridge', type: 'fill', source: 'surface', filter: elevated, paint: {
       'fill-color': COLORS.bridge,
-      // Как на чертеже: под мостом видно нижнюю дорогу и её полосы
-      'fill-opacity': 0.72,
+      'fill-opacity': 0.9,
     } },
     { id: 'junctions-bridge', type: 'fill', source: 'junctions', filter: elevated, paint: {
       'fill-color': COLORS.bridge,
-      'fill-opacity': 0.72,
+      'fill-opacity': 0.9,
     } },
-    { id: 'markings-bridge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', elevated, ['!=', ['get', 'kind'], 'edge']], paint: {
+    { id: 'bridge-casing', type: 'line', source: 'markings', filter: ['all', elevated, ['in', ['get', 'kind'], ['literal', ['edge', 'wing']]]], layout: { 'line-cap': 'round' }, paint: {
+      'line-color': COLORS.bridgeEdge,
+      'line-width': m(0.45, 1.2),
+    } },
+    { id: 'markings-bridge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', elevated, ['!', ['in', ['get', 'kind'], ['literal', ['edge', 'wing']]]]], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.16, 0.5),
     } },
@@ -291,12 +351,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },
-    { id: 'turn-ribbon-bridge', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+    { id: 'turn-ribbon-bridge', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]], ['!', ['to-boolean', ['get', 'forbidden']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(3, 1.5),
       'line-opacity': 0.22,
     } },
-    { id: 'turn-line-bridge', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+    { id: 'turn-line-bridge', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]], ['!', ['to-boolean', ['get', 'forbidden']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(0.3, 0.8),
       'line-opacity': 0.9,
@@ -421,6 +481,20 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': false,
     } },
 
+    // Районы, заданные вручную: видны в редакторе всегда, в расчёте их показывает слой районов модели
+    { id: 'user-zone-fill', type: 'fill', source: 'userZones', filter: ['==', ['get', 'kind'], 'area'], paint: {
+      'fill-color': '#a78bfa',
+      'fill-opacity': 0.1,
+    } },
+    { id: 'user-zone-line', type: 'line', source: 'userZones', filter: ['==', ['get', 'kind'], 'area'], layout: { 'line-join': 'round' }, paint: {
+      'line-color': '#a78bfa',
+      'line-width': 2,
+      'line-dasharray': [3, 2],
+    } },
+    { id: 'user-zone-label', type: 'symbol', source: 'userZones', minzoom: 13, filter: ['==', ['get', 'kind'], 'label'], layout: {
+      'icon-image': ['get', 'image'],
+      'icon-allow-overlap': true,
+    } },
     { id: 'zone-area', type: 'fill', source: 'zoneAreas', layout: { visibility: 'none' }, paint: {
       'fill-color': ['interpolate', ['linear'], ['get', 'share'], 0, '#22c55e', 0.5, '#eab308', 1, '#ef4444'],
       'fill-opacity': 0.16,
@@ -451,20 +525,23 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 1.5,
     } },
+    // Столбик объёма за правой кромкой своего направления. Растёт с масштабом умеренно:
+    // раньше на 20-м уровне он был в 4 раза толще и закрывал соседние улицы
     { id: 'sim-bars', type: 'line', source: 'simBars', layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' }, paint: {
       'line-color': ['match', ['coalesce', ['feature-state', 'los'], -1],
         0, LOS_COLORS[0]!, 1, LOS_COLORS[1]!, 2, LOS_COLORS[2]!, 3, LOS_COLORS[3]!, 4, LOS_COLORS[4]!, 5, LOS_COLORS[5]!,
         'rgba(0,0,0,0)'],
-      // Столбик растёт вместе с масштабом и лежит справа по ходу движения
-      'line-width': ['interpolate', ['exponential', 2], ['zoom'],
-        13, ['*', 0.25, ['coalesce', ['feature-state', 'w'], 0]],
-        17, ['coalesce', ['feature-state', 'w'], 0],
-        20, ['*', 4, ['coalesce', ['feature-state', 'w'], 0]]],
-      'line-offset': ['interpolate', ['exponential', 2], ['zoom'],
-        13, ['*', 0.125, ['coalesce', ['feature-state', 'w'], 0]],
-        17, ['*', 0.5, ['coalesce', ['feature-state', 'w'], 0]],
-        20, ['*', 2, ['coalesce', ['feature-state', 'w'], 0]]],
-      'line-opacity': 0.92,
+      'line-width': ['interpolate', ['linear'], ['zoom'],
+        13, ['*', 0.35, ['coalesce', ['feature-state', 'w'], 0]],
+        16, ['*', 0.75, ['coalesce', ['feature-state', 'w'], 0]],
+        18, ['coalesce', ['feature-state', 'w'], 0],
+        20, ['*', 1.3, ['coalesce', ['feature-state', 'w'], 0]]],
+      'line-offset': ['interpolate', ['linear'], ['zoom'],
+        13, ['+', 0.5, ['*', 0.175, ['coalesce', ['feature-state', 'w'], 0]]],
+        16, ['+', 1, ['*', 0.375, ['coalesce', ['feature-state', 'w'], 0]]],
+        18, ['+', 1.5, ['*', 0.5, ['coalesce', ['feature-state', 'w'], 0]]],
+        20, ['+', 2, ['*', 0.65, ['coalesce', ['feature-state', 'w'], 0]]]],
+      'line-opacity': 0.85,
     } },
     { id: 'sim-bar-labels', type: 'symbol', source: 'simBarLabels', minzoom: 14.5, layout: {
       visibility: 'none',
@@ -521,12 +598,41 @@ export function buildLayers(lat: number): LayerSpecification[] {
     } },
     { id: 'traffic-lane', type: 'line', source: 'trafficLoad', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': ['interpolate', ['linear'], ['get', 'ratio'], 0, '#22c55e', 0.5, '#facc15', 0.8, '#f97316', 1, '#dc2626'],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['+', 1, ['*', ['get', 'ratio'], 2]], 19, ['+', 3, ['*', ['get', 'ratio'], 7]]],
-      'line-opacity': 0.9,
+      // Тонко, по оси своей полосы: загрузка видна, а полосы и соседние дороги не закрыты
+      'line-width': ['interpolate', ['linear'], ['zoom'], 13, ['+', 0.8, ['*', ['get', 'ratio'], 1]], 17, ['+', 1.5, ['*', ['get', 'ratio'], 2]], 19, ['+', 2, ['*', ['get', 'ratio'], 3]]],
+      'line-opacity': 0.85,
     } },
-    { id: 'overlay-ribbon', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'ribbon'], paint: {
-      'fill-color': COLORS.accent,
-      'fill-opacity': 0.3,
+    // Новая дорога в том виде, в каком появится: настил, кромки, полосы и направление
+    { id: 'overlay-draw-surface', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-surface'], paint: {
+      'fill-color': '#4b5059',
+      'fill-opacity': 0.82,
+    } },
+    { id: 'overlay-draw-edge', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-edge'], layout: { 'line-join': 'round' }, paint: {
+      'line-color': COLORS.select,
+      'line-width': 1.6,
+    } },
+    { id: 'overlay-draw-lane', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-lane'], paint: {
+      'line-color': '#e5e7eb',
+      'line-width': 1,
+      'line-opacity': 0.75,
+      'line-dasharray': [3, 3],
+    } },
+    { id: 'overlay-draw-divider', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-divider'], paint: {
+      'line-color': '#e5e7eb',
+      'line-width': 1.6,
+    } },
+    { id: 'overlay-draw-flow', type: 'symbol', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-flow'], layout: {
+      'symbol-placement': 'line',
+      'symbol-spacing': 60,
+      'icon-image': 'direction',
+      'icon-rotate': 90,
+      'icon-size': 0.8,
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    } },
+    { id: 'overlay-zone-draft', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'zone-draft'], paint: {
+      'fill-color': '#a78bfa',
+      'fill-opacity': 0.22,
     } },
     { id: 'overlay-proposal', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'proposal'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': '#f59e0b',
@@ -557,8 +663,20 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-ignore-placement': true,
     } },
     { id: 'overlay-draw', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'draw'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
-      'line-color': COLORS.accentSoft,
-      'line-width': 2.5,
+      'line-color': COLORS.select,
+      'line-width': 2,
+    } },
+    { id: 'overlay-draw-rubber', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-rubber'], layout: { 'line-join': 'round' }, paint: {
+      'line-color': COLORS.select,
+      'line-width': 2,
+      'line-dasharray': [2, 1.5],
+    } },
+    // Пересечение с существующей дорогой без общего узла: потом это ошибка «Пересечение без узла»
+    { id: 'overlay-draw-cross', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-cross'], paint: {
+      'circle-radius': 7,
+      'circle-color': 'rgba(245,158,11,0.3)',
+      'circle-stroke-color': COLORS.warning,
+      'circle-stroke-width': 2.5,
     } },
     { id: 'overlay-object', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'net-object'], paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 9],
@@ -666,11 +784,14 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 2,
     } },
+    // Точки новой дороги: первая крупнее, пристыкованные к сети — зелёные, точка под курсором — призрак
     { id: 'overlay-draw-point', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'draw-point'], paint: {
-      'circle-radius': 5,
+      'circle-radius': ['case', ['to-boolean', ['get', 'first']], 6.5, 5],
       'circle-color': '#141518',
-      'circle-stroke-color': COLORS.accentSoft,
+      'circle-stroke-color': ['case', ['to-boolean', ['get', 'joined']], '#22c55e', COLORS.select],
       'circle-stroke-width': 2,
+      'circle-opacity': ['case', ['to-boolean', ['get', 'ghost']], 0.5, 1],
+      'circle-stroke-opacity': ['case', ['to-boolean', ['get', 'ghost']], 0.6, 1],
     } },
     { id: 'overlay-snap', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'snap'], paint: {
       'circle-radius': 11,
@@ -683,14 +804,14 @@ export function buildLayers(lat: number): LayerSpecification[] {
 
 /** Какие слои видны в каждом режиме просмотра. Остальные слои зависят только от настроек. */
 export const ENGINEERING_LAYERS = [
-  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid', 'lane-line', 'lane-arrow',
-  'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge', 'lane-line-bridge', 'lane-arrow-bridge',
+  'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'tunnel-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid', 'lane-line', 'lane-arrow',
+  'bridge-shadow', 'bridge-outline', 'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge', 'lane-line-bridge', 'lane-arrow-bridge',
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']
-export const TURN_LAYERS = ['turn-ribbon', 'turn-line', 'turn-ribbon-bridge', 'turn-line-bridge']
+export const TURN_LAYERS = ['turn-ribbon', 'turn-line', 'turn-ribbon-bridge', 'turn-line-bridge', 'turn-forbidden', 'turn-forbidden-sign']
 /** Продолжение полос показывается вместе с полосами, даже если траектории манёвров скрыты. */
 export const CONTINUATION_LAYERS = ['turn-continuation', 'turn-continuation-bridge']
-export const SIM_LAYERS = ['sim-load', 'sim-bars', 'sim-bar-labels', 'sim-od', 'sim-zones', 'sim-jams', 'sim-signals']
+export const SIM_LAYERS = ['sim-load', 'sim-flow', 'sim-bars', 'sim-bar-labels', 'sim-od', 'sim-zones', 'sim-jams', 'sim-signals']
 
 export type ThemeName = 'light' | 'dark'
 
@@ -708,11 +829,12 @@ interface MapPalette {
   tunnel: string
   bridge: string
   bridgeEdge: string
+  bridgeOutline: string
+  bridgeShadow: number
   road3d: string
   marking: string
   nodeFill: string
   nodeStroke: string
-  crossing: string
 }
 
 const PALETTES: Record<ThemeName, MapPalette> = {
@@ -730,11 +852,12 @@ const PALETTES: Record<ThemeName, MapPalette> = {
     tunnel: '#b7bac1',
     bridge: '#969ba4',
     bridgeEdge: '#3f444c',
+    bridgeOutline: '#2b2f36',
+    bridgeShadow: 0.28,
     road3d: '#a4a8af',
     marking: '#ffffff',
     nodeFill: '#ffffff',
     nodeStroke: '#20262d',
-    crossing: '#ffffff',
   },
   dark: {
     background: COLORS.background,
@@ -750,11 +873,12 @@ const PALETTES: Record<ThemeName, MapPalette> = {
     tunnel: COLORS.tunnel,
     bridge: COLORS.bridge,
     bridgeEdge: COLORS.bridgeEdge,
+    bridgeOutline: COLORS.bridgeOutline,
+    bridgeShadow: 0.45,
     road3d: '#70747d',
     marking: COLORS.marking,
     nodeFill: '#141518',
     nodeStroke: '#e8ecf1',
-    crossing: '#e8e3cf',
   },
 }
 
@@ -779,27 +903,53 @@ export function themePaint(theme: ThemeName): [string, string, unknown][] {
     ['surface-bridge', 'fill-color', c.bridge],
     ['junctions-bridge', 'fill-color', c.bridge],
     ['bridge-casing', 'line-color', c.bridgeEdge],
+    ['bridge-outline', 'line-color', c.bridgeOutline],
+    ['bridge-shadow', 'fill-opacity', c.bridgeShadow],
     ['road-3d', 'fill-extrusion-color', c.road3d],
     ['markings-edge', 'line-color', c.marking],
     ['markings-divider', 'line-color', c.marking],
     ['markings-lane', 'line-color', c.marking],
     ['markings-lane-solid', 'line-color', c.marking],
     ['markings-bridge', 'line-color', c.marking],
-    ['crossings', 'fill-color', c.crossing],
     ['graph-nodes', 'circle-color', c.nodeFill],
     ['graph-nodes', 'circle-stroke-color', c.nodeStroke],
   ]
 }
 
-export type BasemapId = 'none' | 'satellite' | 'hybrid' | 'scheme2gis' | 'cartoDark' | 'cartoLight' | 'osm' | 'custom'
+export type BasemapId =
+  | 'none'
+  | 'satellite'
+  | 'hybrid'
+  | 'scheme2gis'
+  | 'yandexMap'
+  | 'yandexSat'
+  | 'cartoDark'
+  | 'cartoLight'
+  | 'osm'
+  | 'custom'
+
+/** Проекция, в которой нарезаны тайлы. Карта показывается в EPSG:3857, тайлы 3395 пересчитываются. */
+export type TileCrs = 'EPSG:3857' | 'EPSG:3395'
+
+export const TILE_CRS_OPTIONS: { id: TileCrs; label: string }[] = [
+  { id: 'EPSG:3857', label: 'EPSG:3857, Web Mercator (OSM, Google, 2ГИС, Esri)' },
+  { id: 'EPSG:3395', label: 'EPSG:3395, World Mercator (Яндекс)' },
+]
 
 export const BASEMAP_OPTIONS: { id: BasemapId; label: string }[] = [
   { id: 'none', label: 'Без подложки' },
   { id: 'satellite', label: 'Снимок Esri' },
   { id: 'hybrid', label: 'Снимок и дороги' },
   { id: 'scheme2gis', label: 'Схема 2ГИС' },
+  { id: 'yandexMap', label: 'Яндекс Карты (EPSG:3395)' },
+  { id: 'yandexSat', label: 'Яндекс Спутник (EPSG:3395)' },
   { id: 'osm', label: 'OSM' },
 ]
+
+/** По адресу видно тайлы Яндекса: они в EPSG:3395, без пересчёта в Иркутске съезжают на 20,7 км к югу. */
+export function guessTileCrs(url: string): TileCrs {
+  return /yandex\.(net|ru|com)/i.test(url) ? 'EPSG:3395' : 'EPSG:3857'
+}
 
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services'
 const CARTO = 'https://basemaps.cartocdn.com'
@@ -827,16 +977,33 @@ const BASEMAP_SOURCES: Record<Exclude<BasemapId, 'none' | 'custom'>, RasterSourc
   cartoLight: [
     { type: 'raster', tiles: carto('rastertiles/voyager'), tileSize: 256, maxzoom: 20, attribution: '© CARTO, © OpenStreetMap' },
   ],
+  yandexMap: [
+    {
+      type: 'raster',
+      tiles: [ellipsoidTileUrl('https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x={x}&y={y}&z={z}&scale=1&lang=ru_RU')],
+      tileSize: 256,
+      maxzoom: 20,
+      attribution: '© Яндекс',
+    },
+  ],
+  yandexSat: [
+    { type: 'raster', tiles: [ellipsoidTileUrl('https://core-sat.maps.yandex.net/tiles?l=sat&x={x}&y={y}&z={z}')], tileSize: 256, maxzoom: 19, attribution: '© Яндекс' },
+  ],
   osm: [
     { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap' },
   ],
 }
 
-export function basemapSource(id: BasemapId, customUrl: string): RasterSourceSpecification[] {
+export function isTileTemplate(url: string): boolean {
+  return /^https:\/\/.+/.test(url) && ['{z}', '{x}', '{y}'].every((part) => url.includes(part))
+}
+
+export function basemapSource(id: BasemapId, customUrl: string, customCrs: TileCrs = 'EPSG:3857'): RasterSourceSpecification[] {
   if (id === 'none') return []
   if (id === 'custom') {
     const url = customUrl.trim()
-    return /^https:\/\/.+\{z\}.+/.test(url) ? [{ type: 'raster', tiles: [url], tileSize: 256, maxzoom: 20 }] : []
+    if (!isTileTemplate(url)) return []
+    return [{ type: 'raster', tiles: [customCrs === 'EPSG:3395' ? ellipsoidTileUrl(url) : url], tileSize: 256, maxzoom: 20 }]
   }
   return BASEMAP_SOURCES[id]
 }
@@ -855,12 +1022,17 @@ export const MODEL_LAYERS = [
   'surface',
   'junctions',
   'markings-edge',
+  'tunnel-edge',
   'markings-divider',
   'markings-lane',
   'markings-lane-solid',
   'turn-ribbon',
   'turn-line',
+  'crossings-axis',
+  'crossings-band',
   'crossings',
+  'bridge-shadow',
+  'bridge-outline',
   'bridge-casing',
   'surface-bridge',
   'junctions-bridge',

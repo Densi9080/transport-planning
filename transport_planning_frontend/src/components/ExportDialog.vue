@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { AlertCircle, CheckCircle2, Download, FlaskConical, X } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, Download, FlaskConical, TrafficCone, X } from 'lucide-vue-next'
 import { computed, onMounted, ref } from 'vue'
 
-import { exportOsm, type PreflightResult, runPreflight } from '@/api'
+import { exportOsm, exportSumoSignals, type PreflightResult, runPreflight, type SumoSignalsResult } from '@/api'
 import { changesWithRuleTurns } from '@/core/laneOps'
 import { connectivityReport } from '@/core/validate'
+import { sumoSignalGroups } from '@/sim/sumoSignals'
 import { useEditor } from '@/stores/editor'
 
 const TEAM_KEY = 'osm-editor-team-file'
@@ -121,6 +122,47 @@ async function download(): Promise<void> {
   }
 }
 
+const signalsBusy = ref(false)
+const signals = ref<SumoSignalsResult | null>(null)
+const signalsName = computed(() => cleanName.value.replace(/\.osm$/i, '.add.xml'))
+const signalsMapped = computed(() => {
+  const written = signals.value?.written ?? []
+  return {
+    links: written.reduce((sum, item) => sum + item.links, 0),
+    mapped: written.reduce((sum, item) => sum + item.mapped, 0),
+    conflicts: written.reduce((sum, item) => sum + item.conflicts, 0),
+  }
+})
+
+function saveText(text: string, name: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/** Фазы отдельным файлом для SUMO: сервер собирает сеть из того же .osm и привязывает к ней план редактора. */
+async function downloadSignals(): Promise<void> {
+  if (!editor.doc || !editor.projector || !editor.projectId) return
+  signalsBusy.value = true
+  error.value = null
+  signals.value = null
+  try {
+    const result = await exportSumoSignals(editor.projectId, exportChanges(), sumoSignalGroups(editor.doc, editor.projector))
+    signals.value = result
+    if (result.available && result.ok && result.xml) {
+      saveText(result.xml, signalsName.value, 'application/xml')
+      editor.toast(`Файл ${signalsName.value} сохранён`, 'success')
+    }
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    signalsBusy.value = false
+  }
+}
+
 async function check(): Promise<void> {
   if (!editor.doc || !editor.projectId) return
   checking.value = true
@@ -213,6 +255,38 @@ onMounted(() => dialog.value?.showModal())
           <p class="faint small">Настройки сервера организаторов могут отличаться: окончательно файл проверяет только он.</p>
         </template>
       </template>
+    </div>
+
+    <div class="preflight">
+      <button class="btn block" :disabled="signalsBusy" @click="downloadSignals">
+        <TrafficCone :size="14" aria-hidden="true" />
+        {{ signalsBusy ? 'Привязываем фазы к сети SUMO…' : `Фазы светофоров для SUMO (${signalsName})` }}
+      </button>
+      <template v-if="signals">
+        <p v-if="!signals.available" class="muted small">{{ signals.message }}</p>
+        <template v-else>
+          <p class="result small" :class="signals.ok ? 'ok' : 'fail'">
+            <template v-if="signals.ok">
+              Светофоров в файле: {{ signals.written?.length ?? 0 }}. Соединений SUMO по плану редактора:
+              {{ signalsMapped.mapped }} из {{ signalsMapped.links }}, остальные идут вместе со своим подходом.
+            </template>
+            <template v-else>Ни один светофор не удалось привязать к сети SUMO, файл не сохранён.</template>
+          </p>
+          <p v-if="signalsMapped.conflicts" class="result small fail">
+            Пересекающиеся потоки с зелёным одновременно: {{ signalsMapped.conflicts }}. Проверьте состав фаз.
+          </p>
+          <details v-if="signals.skipped?.length" class="small">
+            <summary>Без плана из редактора: {{ signals.skipped.length }}</summary>
+            <ul class="log">
+              <li v-for="item in signals.skipped" :key="item.id">{{ item.id }}: {{ item.reason }}</li>
+            </ul>
+          </details>
+        </template>
+      </template>
+      <p class="faint small">
+        Файл привязан к сети, которую {{ signals?.netconvert ?? 'netconvert' }} собирает из этого .osm с настройками по умолчанию.
+        Запуск: <code>sumo -n сеть.net.xml -a {{ signalsName }}</code>. Сервер организаторов принимает только .osm, на его прогон файл не влияет.
+      </p>
     </div>
 
     <p v-if="error" class="error" role="alert">{{ error }}</p>
