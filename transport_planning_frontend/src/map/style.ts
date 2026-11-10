@@ -144,6 +144,9 @@ export function buildLayers(lat: number): LayerSpecification[] {
   ]
   const ground: ExpressionSpecification = ['<=', ['get', 'level'], 0]
   const elevated: ExpressionSpecification = ['>', ['get', 'level'], 0]
+  // У линий полос и манёвров уровень может отсутствовать: тогда это земля
+  const groundSafe: ExpressionSpecification = ['<=', ['coalesce', ['get', 'level'], 0], 0]
+  const elevatedSafe: ExpressionSpecification = ['>', ['coalesce', ['get', 'level'], 0], 0]
 
   return [
     { id: 'landuse', type: 'fill', source: 'landuse', paint: {
@@ -224,11 +227,11 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-color': '#f5c400',
       'line-width': m(0.15, 1),
     } },
-    { id: 'lane-line', type: 'line', source: 'laneLines', minzoom: LANE_LINE_ZOOM, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+    { id: 'lane-line', filter: groundSafe, type: 'line', source: 'laneLines', minzoom: LANE_LINE_ZOOM, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': COLORS.laneLine,
       'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
     } },
-    { id: 'lane-arrow', type: 'symbol', source: 'laneLines', minzoom: LANE_LINE_ZOOM + 0.5, layout: {
+    { id: 'lane-arrow', filter: groundSafe, type: 'symbol', source: 'laneLines', minzoom: LANE_LINE_ZOOM + 0.5, layout: {
       'symbol-placement': 'line',
       'symbol-spacing': 90,
       'icon-image': 'direction',
@@ -237,18 +240,18 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },
-    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['!', ['to-boolean', ['get', 'continuation']]], paint: {
+    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(3, 1.5),
       'line-opacity': 0.22,
     } },
-    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['!', ['to-boolean', ['get', 'continuation']]], paint: {
+    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', groundSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(0.3, 0.8),
       'line-opacity': 0.9,
     } },
     // Продолжение полос через стык двух отрезков выглядит как сама полоса
-    { id: 'turn-continuation', type: 'line', source: 'turnPaths', minzoom: LANE_LINE_ZOOM, filter: ['to-boolean', ['get', 'continuation']], layout: { 'line-cap': 'round' }, paint: {
+    { id: 'turn-continuation', type: 'line', source: 'turnPaths', minzoom: LANE_LINE_ZOOM, filter: ['all', groundSafe, ['to-boolean', ['get', 'continuation']]], layout: { 'line-cap': 'round' }, paint: {
       'line-color': COLORS.laneLine,
       'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
     } },
@@ -263,13 +266,44 @@ export function buildLayers(lat: number): LayerSpecification[] {
     } },
     { id: 'surface-bridge', type: 'fill', source: 'surface', filter: elevated, paint: {
       'fill-color': COLORS.bridge,
+      // Как на чертеже: под мостом видно нижнюю дорогу и её полосы
+      'fill-opacity': 0.72,
     } },
     { id: 'junctions-bridge', type: 'fill', source: 'junctions', filter: elevated, paint: {
       'fill-color': COLORS.bridge,
+      'fill-opacity': 0.72,
     } },
     { id: 'markings-bridge', type: 'line', source: 'markings', minzoom: 15, filter: ['all', elevated, ['!=', ['get', 'kind'], 'edge']], paint: {
       'line-color': COLORS.marking,
       'line-width': m(0.16, 0.5),
+    } },
+    // Полосы и манёвры моста лежат поверх его настила: раньше настил закрывал их и они «обрывались»
+    { id: 'lane-line-bridge', filter: elevatedSafe, type: 'line', source: 'laneLines', minzoom: LANE_LINE_ZOOM, layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
+      'line-color': COLORS.laneLine,
+      'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
+    } },
+    { id: 'lane-arrow-bridge', filter: elevatedSafe, type: 'symbol', source: 'laneLines', minzoom: LANE_LINE_ZOOM + 0.5, layout: {
+      'symbol-placement': 'line',
+      'symbol-spacing': 90,
+      'icon-image': 'direction',
+      'icon-rotate': 90,
+      'icon-size': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.35, 20, 0.7],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    } },
+    { id: 'turn-ribbon-bridge', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+      'line-color': APPROACH_COLOR,
+      'line-width': m(3, 1.5),
+      'line-opacity': 0.22,
+    } },
+    { id: 'turn-line-bridge', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['all', elevatedSafe, ['!', ['to-boolean', ['get', 'continuation']]]], paint: {
+      'line-color': APPROACH_COLOR,
+      'line-width': m(0.3, 0.8),
+      'line-opacity': 0.9,
+    } },
+    { id: 'turn-continuation-bridge', type: 'line', source: 'turnPaths', minzoom: LANE_LINE_ZOOM, filter: ['all', elevatedSafe, ['to-boolean', ['get', 'continuation']]], layout: { 'line-cap': 'round' }, paint: {
+      'line-color': COLORS.laneLine,
+      'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
     } },
 
     { id: 'arrows', type: 'symbol', source: 'arrows', minzoom: 16.5, layout: {
@@ -643,12 +677,12 @@ export function buildLayers(lat: number): LayerSpecification[] {
 /** Какие слои видны в каждом режиме просмотра. Остальные слои зависят только от настроек. */
 export const ENGINEERING_LAYERS = [
   'surface-tunnel', 'surface', 'junctions', 'markings-edge', 'markings-divider', 'markings-lane', 'markings-lane-solid', 'lane-line', 'lane-arrow',
-  'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge',
+  'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge', 'lane-line-bridge', 'lane-arrow-bridge',
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']
-export const TURN_LAYERS = ['turn-ribbon', 'turn-line']
+export const TURN_LAYERS = ['turn-ribbon', 'turn-line', 'turn-ribbon-bridge', 'turn-line-bridge']
 /** Продолжение полос показывается вместе с полосами, даже если траектории манёвров скрыты. */
-export const CONTINUATION_LAYERS = ['turn-continuation']
+export const CONTINUATION_LAYERS = ['turn-continuation', 'turn-continuation-bridge']
 export const SIM_LAYERS = ['sim-load', 'sim-bars', 'sim-bar-labels', 'sim-od', 'sim-zones', 'sim-jams', 'sim-signals']
 
 export type ThemeName = 'light' | 'dark'
@@ -824,6 +858,8 @@ export const MODEL_LAYERS = [
   'surface-bridge',
   'junctions-bridge',
   'markings-bridge',
+  'turn-ribbon-bridge',
+  'turn-line-bridge',
   'arrows',
   'graph-links',
   'graph-direction',

@@ -24,7 +24,7 @@ export function laneLineFeatures(network: Network): Feature[] {
       const ordered = forward ? line : [...line].reverse()
       features.push({
         type: 'Feature',
-        properties: { way: link.wayId, lane, forward },
+        properties: { way: link.wayId, lane, forward, level: link.level },
         geometry: { type: 'LineString', coordinates: ordered.map((point) => projector.toLngLat(point)) },
       })
     }

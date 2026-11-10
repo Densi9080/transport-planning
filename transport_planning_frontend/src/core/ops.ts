@@ -427,7 +427,7 @@ export function setMovementAllowed(
         if (outArm.lanesOut === 0 || outArm.neighbor === fromNeighbor) continue
         if (permitted.has(outArm.link.wayId)) continue
         const target = ensureEndsAtVia(doc, via, outArm.neighbor)
-        addRestriction(doc, via, fromWay, target, restrictionValue(turnKind(inArm, outArm)))
+        addRestriction(doc, via, fromWay, target, restrictionValue(turnKind(inArm, outArm, arms)))
       }
     }
   }
@@ -446,7 +446,7 @@ export function setMovementAllowed(
       }
     }
   } else if (isMovementAllowed(inArm, outArm, rules)) {
-    addRestriction(doc, via, fromWay, toWay, restrictionValue(turnKind(inArm, outArm)))
+    addRestriction(doc, via, fromWay, toWay, restrictionValue(turnKind(inArm, outArm, arms)))
   }
 }
 

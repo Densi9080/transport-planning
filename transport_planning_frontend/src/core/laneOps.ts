@@ -117,7 +117,7 @@ export function setMovementLanes(
   const from = arms.find((arm) => arm.neighbor === fromNeighbor)
   const to = arms.find((arm) => arm.neighbor === toNeighbor)
   if (!from || !to || from.lanesIn === 0 || to.lanesOut === 0) return
-  const kind = turnKind(from, to)
+  const kind = turnKind(from, to, arms)
   const lanes: [number, number][] =
     kind === 'right'
       ? [[from.lanesIn - 1, to.lanesOut - 1]]

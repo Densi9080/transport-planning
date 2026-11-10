@@ -128,14 +128,37 @@ function makeArm(link: Link, atStart: boolean): Arm {
 
 export type TurnKind = 'left' | 'through' | 'right' | 'reverse'
 
-export function turnKind(inArm: Arm, outArm: Arm): TurnKind {
-  if (inArm === outArm || inArm.neighbor === outArm.neighbor) return 'reverse'
+const THROUGH_DEG = 35
+const REVERSE_DEG = 155
+
+/** Угол манёвра, градусы: положительный — налево, отрицательный — направо. */
+export function turnAngle(inArm: Arm, outArm: Arm): number {
   const travelIn: XY = { x: -inArm.dir.x, y: -inArm.dir.y }
-  const angle = Math.atan2(cross(travelIn, outArm.dir), dot(travelIn, outArm.dir))
-  const degrees = (angle * 180) / Math.PI
-  if (Math.abs(degrees) < 35) return 'through'
-  if (Math.abs(degrees) > 155) return 'reverse'
-  return degrees > 0 ? 'left' : 'right'
+  return (Math.atan2(cross(travelIn, outArm.dir), dot(travelIn, outArm.dir)) * 180) / Math.PI
+}
+
+/**
+ * Вид манёвра с учётом остальных выездов узла.
+ * «Прямо» может быть только один выезд — самый прямой. Если в конус ±35° попали два выезда (развилка),
+ * второй становится поворотом в свою сторону: иначе в него вели бы все полосы, включая крайнюю левую,
+ * а ПДД (п. 8.5) требуют поворачивать из крайнего положения.
+ */
+export function turnKind(inArm: Arm, outArm: Arm, arms?: Arm[]): TurnKind {
+  if (inArm === outArm || inArm.neighbor === outArm.neighbor) return 'reverse'
+  const degrees = turnAngle(inArm, outArm)
+  if (Math.abs(degrees) > REVERSE_DEG) return 'reverse'
+  if (Math.abs(degrees) >= THROUGH_DEG) return degrees > 0 ? 'left' : 'right'
+  if (arms) {
+    const straighter = arms.some(
+      (other) =>
+        other !== outArm &&
+        other.neighbor !== inArm.neighbor &&
+        other.lanesOut > 0 &&
+        Math.abs(turnAngle(inArm, other)) < Math.abs(degrees),
+    )
+    if (straighter) return degrees > 0 ? 'left' : 'right'
+  }
+  return 'through'
 }
 
 export interface Restriction {
@@ -264,7 +287,7 @@ export function junctionMovements(doc: OsmDoc, network: Network, node: number): 
       movements.push({
         from,
         to,
-        kind: turnKind(from, to),
+        kind: turnKind(from, to, arms),
         allowed: isMovementAllowed(from, to, restrictions),
       })
     }

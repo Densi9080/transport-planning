@@ -370,16 +370,28 @@ function nearestRoadPlace(network: Network, point: XY): { link: Link; along: num
   return best
 }
 
+/**
+ * С каких полос подхода выполняется манёвр. Порядок полос — слева направо, как в turn:lanes.
+ *
+ * Разметка 1.18 (стрелки) и знаки 5.15.1 задают полосы явно. Без них действуют ПДД:
+ * п. 8.5 — направо с крайней правой, налево и в разворот с крайней левой; прямо — со всех полос.
+ * Полоса без стрелки (пустое значение или none) разметки не имеет, поэтому для неё тоже действуют ПДД:
+ * крайняя правая без стрелки разрешает поворот направо, если ни одна стрелка направо не указывает.
+ */
 function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags = false): number[] {
   const profile = arm.link.profile
   const turns = arm.atStart ? profile.turnsBackward : profile.turnsForward
   const count = arm.lanesIn
   const all = Array.from({ length: count }, (_, i) => i)
+  const unmarked = (i: number) => !turns?.[i] || turns[i] === 'none'
 
   if (!ignoreTags && turns && turns.length === count && turns.some((turn) => turn && turn !== 'none')) {
     const tagged = all.filter((i) => turnAllows(turns[i] ?? '', kind))
     if (tagged.length > 0) return tagged
-    return kind === 'through' ? all.filter((i) => !turns[i] || turns[i] === 'none') : []
+    if (kind === 'through') return all.filter(unmarked)
+    if (kind === 'right') return unmarked(count - 1) ? [count - 1] : []
+    if (kind === 'left') return unmarked(0) ? [0] : []
+    return []
   }
   if (count === 1) return [0]
   if (kind === 'left') return [0]
@@ -473,14 +485,14 @@ export function junctionConnectors(
     const fromGeometry = geometries.get(from)!
     const kinds = new Set<TurnKind>()
     for (const to of arms) {
-      if (to.lanesOut > 0 && to.neighbor !== from.neighbor) kinds.add(turnKind(from, to))
+      if (to.lanesOut > 0 && to.neighbor !== from.neighbor) kinds.add(turnKind(from, to, arms))
     }
 
     const collect = (ignoreTags: boolean): Connector[] => {
       const found: Connector[] = []
       for (const to of arms) {
         if (to.lanesOut === 0 || to.neighbor === from.neighbor) continue
-        const kind = turnKind(from, to)
+        const kind = turnKind(from, to, arms)
         if (!continuation && kind === 'reverse') continue
         if (!isMovementAllowed(from, to, restrictions)) continue
         const toGeometry = geometries.get(to)!
@@ -769,14 +781,16 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     }
     if (arms.length >= 3) {
       const approaches = approachSlots(arms)
+      const nodeLevel = Math.max(...arms.map((arm) => levelOf(arm.link)))
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
-        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor, fromLane: connector.fromLane }))
+        turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor, fromLane: connector.fromLane, level: nodeLevel }))
       }
     } else if (arms.length === 2 && !isSeamless(arms)) {
       // Стык двух отрезков с разным сечением: без соединений полосы обрывались бы у площадки узла
+      const joinLevel = Math.max(...arms.map((arm) => levelOf(arm.link)))
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
         if (dist(connector.points[0]!, connector.points.at(-1)!) < 0.3) continue
-        turnPaths.push(lineFeature(connector.points, projector, { turn: 'through', node, approach: 0, continuation: true, from: connector.from.neighbor, to: connector.to.neighbor }))
+        turnPaths.push(lineFeature(connector.points, projector, { turn: 'through', node, approach: 0, continuation: true, from: connector.from.neighbor, to: connector.to.neighbor, level: joinLevel }))
       }
     }
     const nodeTags = doc.node(node).tags

@@ -1208,7 +1208,7 @@ function onClick(event: MapMouseEvent): void {
       if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
         const { x, y } = event.point
         const turn = nearestFeature(
-          map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] }),
+          map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon', 'turn-line-bridge', 'turn-ribbon-bridge'] }),
           event.point,
         )
         const props = turn?.properties as { node?: number; from?: number; to?: number; fromLane?: number } | undefined
@@ -1384,7 +1384,7 @@ function applyView(): void {
   // Полосы и разметка показываются по очереди, иначе на дороге лежат два слоя линий
   const marks = editor.layers.markings
   const roads = lane && !editor.objectHidden.links
-  visible(['lane-line', 'lane-arrow'], roads && !marks)
+  visible(['lane-line', 'lane-arrow', 'lane-line-bridge', 'lane-arrow-bridge'], roads && !marks)
   visible(CONTINUATION_LAYERS, roads && !marks)
   visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths && !editor.objectHidden.turns && !marks)
   visible(['marking-stop', 'marking-zigzag'], roads && marks)
