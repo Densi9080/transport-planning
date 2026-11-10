@@ -40,7 +40,6 @@ import {
   restrictionsAt,
   restrictionVias,
   connectivityAt,
-  turnAngle,
   type TurnKind,
   turnKind,
 } from './topology'
@@ -49,7 +48,6 @@ import { parseAreaKey, STOP_AREA_TAG } from './stops'
 import { reducedSections, SECTION_SPEEDS } from './traffic'
 import { placeSigns } from './trafficSigns'
 import type { OWay, Tags, XY } from './types'
-import { isSignalNode } from './nodeKinds'
 
 export type SceneLayer =
   | 'surface'
@@ -99,8 +97,7 @@ const STOP_ROAD_REACH_M = 30
 const ELEVATED_STEP_M = 4
 const HALF_DIVIDER_M = 0.12
 const MIN_VISIBLE_HEIGHT_M = 0.15
-/** Пролётное строение городского путепровода: балки с плитой около 1,2 м. */
-const DECK_THICKNESS_M = 1.2
+const DECK_THICKNESS_M = 0.5
 
 export interface ArmGeometry {
   arm: Arm
@@ -436,7 +433,7 @@ function nearestRoadPlace(network: Network, point: XY): { link: Link; along: num
  * Полоса без стрелки (пустое значение или none) разметки не имеет, поэтому для неё тоже действуют ПДД:
  * крайняя правая без стрелки разрешает поворот направо, если ни одна стрелка направо не указывает.
  */
-function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags = false, onlyExit = false): number[] {
+function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags = false): number[] {
   const profile = arm.link.profile
   const turns = arm.atStart ? profile.turnsBackward : profile.turnsForward
   const count = arm.lanesIn
@@ -446,21 +443,12 @@ function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags
   if (!ignoreTags && turns && turns.length === count && turns.some((turn) => turn && turn !== 'none')) {
     const tagged = all.filter((i) => turnAllows(turns[i] ?? '', kind))
     if (tagged.length > 0) return tagged
-    if (kind === 'through') {
-      const free = all.filter(unmarked)
-      if (free.length > 0) return free
-      // Стрелки показывают туда, куда отдельного манёвра нет: дорога плавно уходит в ту же сторону,
-      // и «направо» на разметке — это и есть её продолжение. Иначе такие полосы обрывались бы в узле
-      return all.filter((i) => (!kinds.has('right') && turnAllows(turns[i] ?? '', 'right')) || (!kinds.has('left') && turnAllows(turns[i] ?? '', 'left')))
-    }
+    if (kind === 'through') return all.filter(unmarked)
     if (kind === 'right') return unmarked(count - 1) ? [count - 1] : []
     if (kind === 'left') return unmarked(0) ? [0] : []
     return []
   }
   if (count === 1) return [0]
-  // Выезд с подхода один и под пологим углом — это слияние, а не поворот: выбирать полосу незачем,
-  // все полосы съезда вливаются в дорогу
-  if (onlyExit) return all
   if (kind === 'left') return [0]
   if (kind === 'right') return [count - 1]
   if (kind === 'through') return all
@@ -664,9 +652,6 @@ export interface Connector {
  * Манёвры узла по полосам. Отрисовка и симуляция берут их отсюда,
  * поэтому машины едут ровно по тем траекториям, которые показаны на карте.
  */
-/** Слияние, а не поворот: единственный выезд отклоняется от подхода не больше чем на этот угол. */
-const MERGE_MAX_DEG = 60
-
 export function junctionConnectors(
   doc: OsmDoc,
   node: number,
@@ -701,7 +686,6 @@ export function junctionConnectors(
       if (to.lanesOut > 0 && to.neighbor !== from.neighbor) kinds.add(turnKind(from, to, arms))
     }
 
-    const exits = arms.filter((to) => to.lanesOut > 0 && to.neighbor !== from.neighbor && turnKind(from, to, arms) !== 'reverse' && isMovementAllowed(from, to, restrictions)).length
     const collect = (ignoreTags: boolean): Connector[] => {
       const found: Connector[] = []
       for (const to of arms) {
@@ -719,8 +703,7 @@ export function junctionConnectors(
           if (continuation) {
             pairs = continuationPairs(from, to)
           } else {
-            const onlyExit = exits === 1 && Math.abs(turnAngle(from, to)) < MERGE_MAX_DEG
-            const lanes = lanesForTurn(from, kind, kinds, ignoreTags, onlyExit)
+            const lanes = lanesForTurn(from, kind, kinds, ignoreTags)
             pairs = lanes.map((lane, index) => [lane, outLaneFor(index, lanes.length, to.lanesOut, kind)])
           }
         }
@@ -1036,7 +1019,7 @@ function buildCrossings(
       const { point, dir } = pointAlong(link.points, along)
       const road: RoadAt = { point, dir, width: totalWidth(link.profile), wayId: link.wayId }
       roadsAt.set(id, [...(roadsAt.get(id) ?? []), road])
-      if (isSignalNode(tags) && !seenSignal.has(id)) {
+      if (tags?.highway === 'traffic_signals' && !seenSignal.has(id)) {
         seenSignal.add(id)
         signals.push(pointFeature(point, projector, { node: id }))
       }
@@ -1070,7 +1053,7 @@ function buildCrossings(
     crossingMarking(road, leftNormal(road.dir), isMarked(tags), road.wayId, id, crossings, projector)
   }
   for (const node of doc.nodes.values()) {
-    if (isSignalNode(node.tags) && !seenSignal.has(node.id)) {
+    if (node.tags?.highway === 'traffic_signals' && !seenSignal.has(node.id)) {
       signals.push(pointFeature(projector.toXY(node), projector, { node: node.id }))
     }
   }
@@ -1166,40 +1149,15 @@ function elevatedSegments(
     const nb = scale(leftNormal(pb.dir), halfWidth)
     const z = heightAlong(profile, (a + b) / 2)
     if (z < MIN_VISIBLE_HEIGHT_M) continue
-    // Мост — пролётное строение на опорах; подход к нему — насыпь от самой земли, как у здания
-    const base = link.bridge ? Math.max(0, z - DECK_THICKNESS_M) : 0
     output.push(
       polygonFeature(
         [add(pa.point, na), add(pb.point, nb), sub(pb.point, nb), sub(pa.point, na)],
         projector,
-        { wayId: link.wayId, base, top: z, kind: link.bridge ? 'deck' : 'embankment' },
-      ),
-    )
-  }
-  if (!link.bridge) return
-  // Опоры: поперёк моста стенки под настилом, на концах и через равные пролёты
-  const span = end - start
-  const piers = Math.max(1, Math.round(span / PIER_SPAN_M))
-  for (let i = 0; i <= piers; i++) {
-    const at = start + Math.min(span, Math.max(0, (span * i) / piers))
-    const z = heightAlong(profile, at)
-    if (z - DECK_THICKNESS_M < MIN_VISIBLE_HEIGHT_M) continue
-    const { point, dir } = pointAlong(link.points, at)
-    const across = scale(leftNormal(dir), halfWidth * PIER_WIDTH_SHARE)
-    const along = scale(dir, PIER_THICKNESS_M / 2)
-    output.push(
-      polygonFeature(
-        [add(add(point, across), along), add(sub(point, across), along), sub(sub(point, across), along), sub(add(point, across), along)],
-        projector,
-        { wayId: link.wayId, base: 0, top: z - DECK_THICKNESS_M, kind: 'pier' },
+        { wayId: link.wayId, base: z - DECK_THICKNESS_M, top: z },
       ),
     )
   }
 }
-
-const PIER_SPAN_M = 24
-const PIER_THICKNESS_M = 1.6
-const PIER_WIDTH_SHARE = 0.75
 
 const BRIDGE_WING_M = 3
 
@@ -1271,7 +1229,7 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       }
     }
     const nodeTags = doc.node(node).tags
-    if (isSignalNode(nodeTags) || nodeTags?.highway === 'stop') {
+    if (nodeTags?.highway === 'traffic_signals' || nodeTags?.highway === 'stop') {
       for (const arm of arms) {
         const geometry = geometries.get(arm)
         if (geometry && arm.lanesIn > 0) markings.push(stopLine(geometry, arm, projector))
@@ -1282,9 +1240,6 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       if (arms.length >= 2) {
         graphNodes.push(pointFeature(position, projector, { node, degree: arms.length }))
       }
-    } else if (arms[0]!.link.wayId !== arms[1]!.link.wayId) {
-      // Место разреза: дорога продолжается без изменений, но это уже две дороги, и точка между ними видна
-      graphNodes.push(pointFeature(projector.toXY(doc.node(node)), projector, { node, degree: 2, split: true }))
     }
   }
 

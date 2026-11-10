@@ -1,7 +1,6 @@
 import type { OsmDoc } from '@/core/doc'
 import type { Projector } from '@/core/geo'
 import { isOneway, parseProfile, withLanes } from '@/core/lanes'
-import { isSignalNode } from '@/core/nodeKinds'
 import { reverseWay, setMovementAllowed, setNodeTags, setWayTags, toggleNodeHighway } from '@/core/ops'
 import { setLineTags } from '@/core/transit'
 import type { Tags } from '@/core/types'
@@ -138,7 +137,7 @@ export function applyEdit(doc: OsmDoc, projector: Projector, edit: Edit): void {
       reverseWay(doc, edit.way_id)
       break
     case 'set_signal':
-      if (isSignalNode(doc.node(edit.node_id).tags) !== edit.enabled) {
+      if ((doc.node(edit.node_id).tags?.highway === 'traffic_signals') !== edit.enabled) {
         toggleNodeHighway(doc, edit.node_id, 'traffic_signals')
       }
       break

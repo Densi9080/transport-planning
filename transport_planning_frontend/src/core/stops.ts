@@ -22,26 +22,6 @@ export const STOP_AREA_TAG = 'tp:stop_area'
 
 export type AreaKind = 'node' | 'way'
 
-/** Вид транспорта остановки: от него зависит значок на карте. Трамвайные выделяются отдельно. */
-export type StopMode = 'bus' | 'trolleybus' | 'tram'
-
-/** Вид по тегам объекта: railway=tram_stop или tram=yes — трамвай, trolleybus=yes — троллейбус. */
-export function stopModeOfTags(tags: Tags | undefined): StopMode | null {
-  if (!tags) return null
-  if (tags.railway === 'tram_stop' || tags.tram === 'yes') return 'tram'
-  if (tags.trolleybus === 'yes') return 'trolleybus'
-  if (tags.bus === 'yes' || tags.highway === 'bus_stop' || tags.highway === 'platform') return 'bus'
-  return null
-}
-
-/** Вид по маршрутам, которые обслуживают объект: если только трамваи — трамвайная. */
-function modeOfRoutes(routes: Set<string> | undefined): StopMode | null {
-  if (!routes || routes.size === 0) return null
-  if (routes.has('tram') && routes.size === 1) return 'tram'
-  if (routes.has('trolleybus') && !routes.has('bus')) return 'trolleybus'
-  return routes.has('bus') || routes.has('trolleybus') ? 'bus' : null
-}
-
 export interface StopAreaInfo {
   key: string
   kind: AreaKind
@@ -51,7 +31,6 @@ export interface StopAreaInfo {
   /** Остановка (отношение stop_area), в которую входит зона. */
   stop: number | null
   points: number[]
-  mode: StopMode
 }
 
 export interface StopPointInfo {
@@ -59,7 +38,6 @@ export interface StopPointInfo {
   area: string | null
   /** Зона задана тегом, а не выбрана по расстоянию. */
   explicit: boolean
-  mode: StopMode
 }
 
 export interface StopInfo {
@@ -102,14 +80,14 @@ export function buildStopHierarchy(doc: OsmDoc, projector: Projector): StopHiera
   for (const node of doc.nodes.values()) {
     if (!matchesNode('stopAreas', node, doc)) continue
     const key = areaKey('node', node.id)
-    areas.set(key, { key, kind: 'node', id: node.id, name: node.tags?.name ?? `Зона ${node.id}`, position: node, stop: null, points: [], mode: 'bus' })
+    areas.set(key, { key, kind: 'node', id: node.id, name: node.tags?.name ?? `Зона ${node.id}`, position: node, stop: null, points: [] })
   }
   for (const way of doc.ways.values()) {
     if (!matchesWay('stopAreas', way)) continue
     const position = average(way.nds.map((id) => doc.nodes.get(id)).filter((n): n is ONode => !!n))
     if (!position) continue
     const key = areaKey('way', way.id)
-    areas.set(key, { key, kind: 'way', id: way.id, name: way.tags?.name ?? `Зона ${way.id}`, position, stop: null, points: [], mode: 'bus' })
+    areas.set(key, { key, kind: 'way', id: way.id, name: way.tags?.name ?? `Зона ${way.id}`, position, stop: null, points: [] })
   }
 
   const stops = new Map<number, StopInfo>()
@@ -158,7 +136,7 @@ export function buildStopHierarchy(doc: OsmDoc, projector: Projector): StopHiera
       const candidates = allAreas.filter((item) => item.stop !== null && ownStops.includes(item.stop))
       area = candidates.length > 0 ? nearest(node, candidates, Number.POSITIVE_INFINITY) : nearest(node, allAreas, AREA_REACH_M)
     }
-    points.set(node.id, { node, area: area?.key ?? null, explicit, mode: 'bus' })
+    points.set(node.id, { node, area: area?.key ?? null, explicit })
     area?.points.push(node.id)
   }
 
@@ -172,31 +150,7 @@ export function buildStopHierarchy(doc: OsmDoc, projector: Projector): StopHiera
       ...stop.points.map((id) => doc.node(id)),
     ])
   }
-  assignModes(doc, areas, points)
   return { areas, points, stops }
-}
-
-function assignModes(doc: OsmDoc, areas: Map<string, StopAreaInfo>, points: Map<number, StopPointInfo>): void {
-  const routes = new Map<string, Set<string>>()
-  for (const relation of doc.relations.values()) {
-    const route = relation.tags?.route
-    if (route !== 'bus' && route !== 'trolleybus' && route !== 'tram') continue
-    for (const [type, ref] of relation.members) {
-      const key = `${type}/${ref}`
-      const set = routes.get(key)
-      if (set) set.add(route)
-      else routes.set(key, new Set([route]))
-    }
-  }
-  for (const point of points.values()) {
-    point.mode = stopModeOfTags(point.node.tags) ?? modeOfRoutes(routes.get(`node/${point.node.id}`)) ?? 'bus'
-  }
-  for (const area of areas.values()) {
-    const tags = area.kind === 'node' ? doc.nodes.get(area.id)?.tags : doc.ways.get(area.id)?.tags
-    const own = stopModeOfTags(tags) ?? modeOfRoutes(routes.get(area.key))
-    const fromPoints = area.points.map((id) => points.get(id)?.mode)
-    area.mode = own ?? (fromPoints.length > 0 && fromPoints.every((mode) => mode === 'tram') ? 'tram' : (fromPoints.find(Boolean) ?? 'bus'))
-  }
 }
 
 export function nearAreas(hierarchy: StopHierarchy, projector: Projector, origin: LatLon, reachM: number): { area: StopAreaInfo; distanceM: number }[] {

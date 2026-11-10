@@ -5,13 +5,9 @@ import { setNodeTags } from './ops'
 import { type Link, wayLevel } from './topology'
 import type { OWay, Tags } from './types'
 
-/** Высота уровня: габарит 5,5 м над дорогой и железной дорогой плюс толщина пролётного строения. */
-export const LAYER_HEIGHT_M = 7
+const LAYER_HEIGHT_M = 5.5
 const AUTO_RAMP_M = 30
 const MAX_RAMP_SHARE = 0.45
-/** Подъём по подходу к мосту: уклон около 6 % на высоту уровня. */
-const APPROACH_RAMP_M = 110
-const MAX_APPROACH_SHARE = 0.9
 
 export interface HeightProfile {
   /** Накопленная длина в точках участка. */
@@ -31,11 +27,15 @@ function smoothstep(t: number): number {
 
 function wayAlong(doc: OsmDoc, way: OWay, projector: Projector | null): number[] {
   const along = [0]
-  const p = projector ?? new Projector(doc.bounds)
   for (let i = 1; i < way.nds.length; i++) {
     const a = doc.nodes.get(way.nds[i - 1]!)
     const b = doc.nodes.get(way.nds[i]!)
-    along.push(along[i - 1]! + (a && b ? dist(p.toXY(a), p.toXY(b)) : 0))
+    let step = 0
+    if (a && b) {
+      const p = projector ?? new Projector(doc.bounds)
+      step = dist(p.toXY(a), p.toXY(b))
+    }
+    along.push(along[i - 1]! + step)
   }
   return along
 }
@@ -56,16 +56,6 @@ function touchesGround(doc: OsmDoc, nodeId: number, way: OWay): boolean {
 export function wayHeights(doc: OsmDoc, way: OWay): Map<number, number> {
   const result = new Map<number, number>()
   const values = way.nds.map((id) => parseEle(doc.nodes.get(id)?.tags))
-  const level = wayLevel(way.tags ?? {})
-  // Обычная дорога на земле без ele и без моста на концах — самый частый случай: длины ей не нужны
-  if (level <= 0 && values.every((value) => value === null)) {
-    const startTop = level === 0 ? bridgeHeightAt(doc, way.nds[0]!, way) : 0
-    const endTop = level === 0 ? bridgeHeightAt(doc, way.nds.at(-1)!, way) : 0
-    if (startTop === 0 && endTop === 0) {
-      for (const id of way.nds) result.set(id, 0)
-      return result
-    }
-  }
   const along = wayAlong(doc, way, null)
   const total = along.at(-1) ?? 0
 
@@ -90,59 +80,22 @@ export function wayHeights(doc: OsmDoc, way: OWay): Map<number, number> {
     return result
   }
 
-  if (level > 0) {
-    // Пролёт моста целиком на своей высоте: подъём к нему идёт по подходам, а не внутри пролёта.
-    // Иначе короткий мост поднимался бы лишь серединой и выглядел плоским, а машины ехали бы под настилом
-    const plateau = level * LAYER_HEIGHT_M
-    if (!isBridgeLike(way.tags) && total > 0) {
-      // Эстакада без тега bridge (просто layer=1) по-прежнему сама опускается к земле
-      const ramp = Math.min(AUTO_RAMP_M, total * MAX_RAMP_SHARE)
-      const startGround = touchesGround(doc, way.nds[0]!, way)
-      const endGround = touchesGround(doc, way.nds.at(-1)!, way)
-      way.nds.forEach((id, index) => {
-        const position = along[index]!
-        const fromStart = startGround && ramp > 0 ? smoothstep(position / ramp) : 1
-        const fromEnd = endGround && ramp > 0 ? smoothstep((total - position) / ramp) : 1
-        result.set(id, plateau * Math.min(fromStart, fromEnd))
-      })
-      return result
-    }
-    for (const id of way.nds) result.set(id, plateau)
-    return result
-  }
-  // Подход к мосту: дорога на земле поднимается к его концу
-  const startTop = level === 0 ? bridgeHeightAt(doc, way.nds[0]!, way) : 0
-  const endTop = level === 0 ? bridgeHeightAt(doc, way.nds.at(-1)!, way) : 0
-  if (startTop === 0 && endTop === 0) {
+  const level = wayLevel(way.tags ?? {})
+  if (level <= 0) {
     for (const id of way.nds) result.set(id, 0)
     return result
   }
-  const share = startTop > 0 && endTop > 0 ? MAX_RAMP_SHARE : MAX_APPROACH_SHARE
-  const ramp = Math.min(APPROACH_RAMP_M, total * share)
+  const plateau = level * LAYER_HEIGHT_M
+  const ramp = Math.min(AUTO_RAMP_M, total * MAX_RAMP_SHARE)
+  const startGround = touchesGround(doc, way.nds[0]!, way)
+  const endGround = touchesGround(doc, way.nds.at(-1)!, way)
   way.nds.forEach((id, index) => {
     const position = along[index]!
-    const fromStart = startTop > 0 && ramp > 0 ? startTop * (1 - smoothstep(position / ramp)) : 0
-    const fromEnd = endTop > 0 && ramp > 0 ? endTop * (1 - smoothstep((total - position) / ramp)) : 0
-    result.set(id, Math.max(fromStart, fromEnd))
+    const fromStart = startGround && ramp > 0 ? smoothstep(position / ramp) : 1
+    const fromEnd = endGround && ramp > 0 ? smoothstep((total - position) / ramp) : 1
+    result.set(id, plateau * Math.min(fromStart, fromEnd))
   })
   return result
-}
-
-function isBridgeLike(tags: Tags | undefined): boolean {
-  return (!!tags?.bridge && tags.bridge !== 'no') || tags?.man_made === 'bridge'
-}
-
-/** Высота настила моста, который начинается или кончается в этом узле. 0 — моста нет. */
-function bridgeHeightAt(doc: OsmDoc, nodeId: number, way: OWay): number {
-  let top = 0
-  for (const id of doc.waysOfNode(nodeId)) {
-    if (id === way.id) continue
-    const other = doc.ways.get(id)
-    if (!other || !isDrivable(other.tags) || !isBridgeLike(other.tags)) continue
-    const level = wayLevel(other.tags ?? {})
-    if (level > 0) top = Math.max(top, level * LAYER_HEIGHT_M)
-  }
-  return top
 }
 
 export function linkHeights(doc: OsmDoc, link: Link): HeightProfile {

@@ -1,7 +1,6 @@
 import type { OsmDoc } from './doc'
 import { nearestOnSegment, Projector } from './geo'
 import { isOneway } from './lanes'
-import { toggledCrossingTags, toggledSignalTags } from './nodeKinds'
 import {
   buildNetwork,
   isMovementAllowed,
@@ -452,16 +451,18 @@ export function setMovementAllowed(
 }
 
 export function toggleNodeHighway(doc: OsmDoc, id: number, value: string): boolean {
-  const current: Tags = { ...doc.node(id).tags }
-  if (value === 'traffic_signals' || value === 'crossing') {
-    const { tags, enabled } = value === 'traffic_signals' ? toggledSignalTags(current) : toggledCrossingTags(current)
-    setNodeTags(doc, id, tags)
-    return enabled
+  const tags: Tags = { ...doc.node(id).tags }
+  const enabled = tags.highway !== value
+  if (enabled) {
+    tags.highway = value
+  } else {
+    delete tags.highway
   }
-  const enabled = current.highway !== value
-  if (enabled) current.highway = value
-  else delete current.highway
-  setNodeTags(doc, id, current)
+  if (value === 'crossing') {
+    if (enabled) tags.crossing = tags.crossing ?? 'uncontrolled'
+    else delete tags.crossing
+  }
+  setNodeTags(doc, id, tags)
   return enabled
 }
 

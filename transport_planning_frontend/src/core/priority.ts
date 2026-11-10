@@ -1,7 +1,6 @@
 import type { OsmDoc } from './doc'
 import { dist, type Projector } from './geo'
 import { isOneway } from './lanes'
-import { isSignalNode } from './nodeKinds'
 import { insertNodeOnWay, setNodeTags } from './ops'
 import { RANK, signPlace, travelsForward } from './prioritySuggest'
 import { type Arm, buildNetwork, type Network, turnKind } from './topology'
@@ -81,7 +80,7 @@ export function junctionPriority(doc: OsmDoc, network: Network, node: number): J
   const describe = (main: Arm[]): ArmPriority[] =>
     arms.map((arm) => ({ arm, role: main.includes(arm) ? 'main' : 'minor', sign: signs.get(arm)?.sign ?? null, signNode: signs.get(arm)?.node ?? null }))
 
-  if (isSignalNode(tags)) {
+  if (tags?.highway === 'traffic_signals') {
     if ([...signs.values()].some(Boolean)) issues.push({ severity: 'info', text: 'Знаки приоритета действуют только при выключенном или мигающем жёлтом светофоре (п. 13.3 ПДД)' })
     return { kind: 'signals', explicit: false, arms: describe([]), bend: null, issues }
   }

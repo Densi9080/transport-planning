@@ -22,7 +22,6 @@ import {
   toggleStructure,
   unglueNode,
 } from '@/core/ops'
-import { tunnelUnderBridge } from '@/core/underpass'
 import { DEFAULT_PRESET_ID, ROAD_PRESETS } from '@/core/presets'
 import { type CrsId, normalizeCrs, setCustomCrs } from '@/core/crs'
 import type { CrsEntry } from '@/core/crsCatalog'
@@ -30,7 +29,6 @@ import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lan
 import { nodeConnectors, resetLaneConnections, setLaneConnection, setMovementLanes } from '@/core/laneOps'
 import { type TurnAttrs, writeTurnAttrs } from '@/core/turnAttrs'
 import { laneOffsets, parseProfile, totalWidth, withLanes, withLaneShift } from '@/core/lanes'
-import { isSignalNode } from '@/core/nodeKinds'
 import { buildNetwork, junctionMovements } from '@/core/topology'
 import {
   addSpeedBump,
@@ -720,7 +718,7 @@ export const useEditor = defineStore('editor', () => {
   /** Выполняет правку одним шагом отмены. Ошибка откатывает всё и показывается пользователю. */
   /** Редактор узла. На светофоре сразу открываются фазы: за ними туда и идут. */
   function openJunction(id: number, tab?: 'lanes' | 'signal'): void {
-    junctionTab.value = tab ?? (isSignalNode(doc.value?.nodes.get(id)?.tags) ? 'signal' : 'lanes')
+    junctionTab.value = tab ?? (doc.value?.nodes.get(id)?.tags?.highway === 'traffic_signals' ? 'signal' : 'lanes')
     junctionNode.value = id
   }
 
@@ -1386,18 +1384,6 @@ export const useEditor = defineStore('editor', () => {
     }
   }
 
-  /** Дороги под мостом получают тоннель ровно на ширину настила. */
-  function makeTunnelUnderBridge(bridgeId: number): void {
-    const result = mutate('Тоннель под мостом', (d, p) => tunnelUnderBridge(d, p, bridgeId))
-    if (!result) return
-    if (result.tunnels.length === 0) {
-      toast(result.crossed.length === 0 ? 'Под мостом нет проезжих дорог' : 'Дороги под мостом уже в тоннеле или выше него')
-      return
-    }
-    select(result.tunnels.map((id) => ({ kind: 'way' as const, id })))
-    toast(`Тоннель под мостом: ${result.tunnels.length} уч.`, 'success')
-  }
-
   function toggleWayStructure(wayId: number, kind: 'bridge' | 'tunnel'): void {
     let enabled = false
     mutate(kind === 'bridge' ? 'Мост' : 'Тоннель', (d) => {
@@ -1859,7 +1845,6 @@ export const useEditor = defineStore('editor', () => {
     addNodeOnWay,
     toggleOnNode,
     toggleWayStructure,
-    makeTunnelUnderBridge,
     finishRoad,
     speedStart,
     connectorFrom,

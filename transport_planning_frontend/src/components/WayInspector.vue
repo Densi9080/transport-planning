@@ -266,14 +266,6 @@ function changeLayer(delta: number): void {
           <button :class="{ active: structure === 'tunnel' }" :aria-pressed="structure === 'tunnel'" @click="setStructure('tunnel')">Тоннель</button>
         </div>
       </div>
-      <button
-        v-if="structure === 'bridge'"
-        class="btn small block"
-        title="Дороги под мостом режутся по краям настила, кусок под ним становится тоннелем (tunnel=yes, layer=-1)"
-        @click="editor.makeTunnelUnderBridge(way.id)"
-      >
-        Тоннель под мостом
-      </button>
       <div class="field">
         <label>Уровень (layer)</label>
         <div class="stepper">

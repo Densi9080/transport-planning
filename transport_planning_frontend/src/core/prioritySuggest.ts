@@ -1,7 +1,6 @@
 import type { OsmDoc } from './doc'
 import { dist, pointAlong, type Projector } from './geo'
 import { isOneway } from './lanes'
-import { isSignalNode } from './nodeKinds'
 import { insertNodeOnWay, setNodeTags } from './ops'
 import type { Arm, Network } from './topology'
 import { signApplies } from './traffic'
@@ -127,7 +126,7 @@ export function suggestPrioritySigns(doc: OsmDoc, projector: Projector, network:
     if (arms.length < 3) continue
     summary.junctions++
     const tags = doc.nodes.get(junction)?.tags
-    if (isSignalNode(tags)) {
+    if (tags?.highway === 'traffic_signals') {
       summary.signalized++
       continue
     }

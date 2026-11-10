@@ -174,7 +174,7 @@ export function greenShare(plan: SignalPlan, phases: readonly number[]): number 
 }
 
 function clonePlan(plan: SignalPlan): SignalPlan {
-  return { ...plan, phases: plan.phases.map((phase) => ({ ...phase, movements: [...phase.movements] })) }
+  return { ...plan, phases: plan.phases.map((phase) => ({ green: phase.green, movements: [...phase.movements] })) }
 }
 
 /**

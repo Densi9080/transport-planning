@@ -121,9 +121,7 @@ export function parseProfile(tags: Tags): LaneProfile {
     backward = taggedBackward ?? Math.max(1, (total ?? 0) - forward)
   } else if (total) {
     forward = Math.ceil(total / 2)
-    // lanes=1 на двусторонней дороге — один общий проезд на оба направления (узкий проезд,
-    // дворовая дорога). Ехать по нему можно в обе стороны, как и в SUMO: по полосе туда и обратно
-    backward = total === 1 ? 1 : Math.max(total - forward, 0)
+    backward = Math.max(total - forward, 0)
   } else {
     forward = fallback
     backward = fallback

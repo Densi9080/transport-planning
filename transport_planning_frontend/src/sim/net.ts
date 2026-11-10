@@ -2,7 +2,6 @@ import type { OsmDoc } from '@/core/doc'
 import { heightAlong, linkHeights } from '@/core/elevation'
 import { dist, leftNormal, offsetPolyline, polylineLength, Projector, quadraticCurve, sub, trimPolyline, unit } from '@/core/geo'
 import { laneOffsets } from '@/core/lanes'
-import { isSignalNode } from '@/core/nodeKinds'
 import {
   armsByLink,
   computeArmGeometries,
@@ -363,38 +362,31 @@ function buildConnectors(doc: OsmDoc, network: Network, net: SimNet, byArm: Map<
     const local: SimConnector[] = []
     const continuation = arms.length === 2
     const specs: Connector[] = junctionConnectors(doc, node, arms, geometries)
-    const add = (fromLane: SimLane, toLane: SimLane, kind: TurnKind, fromNeighbor: number, toNeighbor: number, points: XY[]): void => {
-      const zFrom = fromLane.heights.at(-1) ?? 0
-      const zTo = toLane.heights[0] ?? 0
-      const heights = points.map((_, i) => zFrom + ((zTo - zFrom) * i) / Math.max(1, points.length - 1))
-      const connector = new SimConnector(node, fromLane, toLane, kind, continuation, fromNeighbor, toNeighbor, points, heights)
-      fromLane.connectors.push(connector)
-      toLane.feeders.push(connector)
-      fromLane.edge.moves.set(toLane.edge, kind)
-      local.push(connector)
-      net.connectors.push(connector)
-    }
-    /** Полосы, чьи соединения ведут на дороги, закрытые для машин (только автобусы и т. п.). */
-    const closedExits = new Set<SimLane>()
     for (const spec of specs) {
       const fromEdge = byArm.get(spec.from)?.in
       const toEdge = byArm.get(spec.to)?.out
       const fromLane = fromEdge?.lanes[spec.fromLane]
       const toLane = toEdge?.lanes[spec.toLane]
-      if (fromLane && !toEdge) closedExits.add(fromLane)
       if (!fromEdge || !toEdge || !fromLane || !toLane) continue
-      add(fromLane, toLane, spec.kind, spec.from.neighbor, spec.to.neighbor, spec.points)
-    }
-    // Иначе полоса обрывалась бы в узле: машина на ней встала бы навсегда. Она едет туда же,
-    // куда соседняя полоса, — как при перестроении перед развилкой
-    for (const lane of closedExits) {
-      if (lane.connectors.length > 0) continue
-      const donor = [...lane.edge.lanes]
-        .filter((other) => other !== lane && other.connectors.length > 0)
-        .sort((a, b) => Math.abs(a.index - lane.index) - Math.abs(b.index - lane.index))[0]
-      const source = donor?.connectors.find((c) => c.kind === 'through') ?? donor?.connectors[0]
-      if (!source) continue
-      add(lane, source.toLane, source.kind, source.fromNeighbor, source.toNeighbor, [lane.points.at(-1)!, ...source.points.slice(1)])
+      const zFrom = fromLane.heights.at(-1) ?? 0
+      const zTo = toLane.heights[0] ?? 0
+      const heights = spec.points.map((_, i) => zFrom + ((zTo - zFrom) * i) / Math.max(1, spec.points.length - 1))
+      const connector = new SimConnector(
+        node,
+        fromLane,
+        toLane,
+        spec.kind,
+        continuation,
+        spec.from.neighbor,
+        spec.to.neighbor,
+        spec.points,
+        heights,
+      )
+      fromLane.connectors.push(connector)
+      toLane.feeders.push(connector)
+      fromEdge.moves.set(toEdge, spec.kind)
+      local.push(connector)
+      net.connectors.push(connector)
     }
     computeConflicts(local)
   }
@@ -469,7 +461,7 @@ function signalNodes(doc: OsmDoc, network: Network, guess: boolean): number[] {
   const nodes: number[] = []
   for (const [id, arms] of network.arms) {
     const tags = doc.nodes.get(id)?.tags
-    if (isSignalNode(tags) && arms.length >= 2) {
+    if (tags?.highway === 'traffic_signals' && arms.length >= 2) {
       nodes.push(id)
       continue
     }
@@ -509,10 +501,7 @@ export function autoPlan(connectors: SimConnector[]): SignalPlan {
     allRed: DEFAULT_ALL_RED_S,
     phases: [
       { green: pedestrianOnly ? GREEN_THROUGH_S : GREEN_MAIN_S, movements: phases[0]! },
-      // Светофор на перегоне (регулируемый переход): вторая фаза целиком пешеходная
-      pedestrianOnly
-        ? { green: GREEN_PEDESTRIAN_S, movements: [], pedestrian: true }
-        : { green: GREEN_SECOND_S, movements: phases[1]! },
+      { green: pedestrianOnly ? GREEN_PEDESTRIAN_S : GREEN_SECOND_S, movements: phases[1]! },
     ],
   }
 }
@@ -575,7 +564,7 @@ function buildSignals(doc: OsmDoc, net: SimNet, guess: boolean): void {
 function planOwner(doc: OsmDoc, members: number[]): number {
   return (
     members.find((id) => parseSignalPlan(doc.node(id).tags)) ??
-    members.find((id) => isSignalNode(doc.node(id).tags)) ??
+    members.find((id) => doc.node(id).tags?.highway === 'traffic_signals') ??
     members[0]!
   )
 }

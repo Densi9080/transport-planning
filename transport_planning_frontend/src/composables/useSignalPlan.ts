@@ -1,7 +1,6 @@
 import { computed, ref, shallowRef } from 'vue'
 
 import { setSignalPlan } from '@/core/laneOps'
-import { isSignalNode } from '@/core/nodeKinds'
 import {
   cycleLength,
   MAX_ALL_RED_S,
@@ -57,7 +56,7 @@ export function useSignalPlan(node: () => number) {
     void editor.rev
     const doc = editor.doc
     const current = group.value
-    return !!current && !!doc && !current.nodes.some((id) => isSignalNode(doc.nodes.get(id)?.tags))
+    return !!current && !!doc && !current.nodes.some((id) => doc.nodes.get(id)?.tags?.highway === 'traffic_signals')
   })
 
   /** Время модели, пока идёт микросимуляция. В остальное время сигнал не горит, а только запланирован. */
@@ -100,7 +99,7 @@ export function useSignalPlan(node: () => number) {
     else editor.toast(text)
   }
 
-  function setGreenTime(direction: Pick<SignalDirection, 'phases'>, seconds: number): number {
+  function setGreenTime(direction: SignalDirection, seconds: number): number {
     const current = plan.value!
     const next = withGreenTime(current, direction.phases, seconds)
     commit(next, 'Зелёный направления')
@@ -109,7 +108,7 @@ export function useSignalPlan(node: () => number) {
     return actual
   }
 
-  function setRedTime(direction: Pick<SignalDirection, 'phases'>, seconds: number): number {
+  function setRedTime(direction: SignalDirection, seconds: number): number {
     const current = plan.value!
     const next = withRedTime(current, direction.phases, seconds)
     commit(next, 'Красный направления')

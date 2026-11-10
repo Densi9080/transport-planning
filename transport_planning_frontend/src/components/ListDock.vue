@@ -3,7 +3,6 @@ import { ArrowDown, ArrowUp, Download, Search, X } from 'lucide-vue-next'
 import { computed, ref, watch } from 'vue'
 
 import { isDrivable, isOneway, parseProfile, withLanes } from '@/core/lanes'
-import { isSignalNode } from '@/core/nodeKinds'
 import { parseSignalPlan } from '@/core/signals'
 import { TRANSIT_MODE_LABELS } from '@/core/transit'
 import { LOS_LABELS, parseSpeed } from '@/sim/macro'
@@ -188,7 +187,7 @@ const rows = computed<Row[]>(() => {
           _id: id,
           name: nodeNames(id),
           arms: arms.length,
-          control: isSignalNode(doc.nodes.get(id)?.tags) ? 'Светофор' : arms.length >= 3 ? 'Без светофора' : 'Стык',
+          control: doc.nodes.get(id)?.tags?.highway === 'traffic_signals' ? 'Светофор' : arms.length >= 3 ? 'Без светофора' : 'Стык',
           restrictions,
         })
       }
@@ -196,7 +195,7 @@ const rows = computed<Row[]>(() => {
     }
     case 'signals':
       return [...doc.nodes.values()]
-        .filter((node) => isSignalNode(node.tags))
+        .filter((node) => node.tags?.highway === 'traffic_signals')
         .map((node) => {
           const plan = parseSignalPlan(node.tags)
           const cycle = plan ? plan.phases.reduce((sum, phase) => sum + phase.green + plan.yellow + plan.allRed, 0) : null
