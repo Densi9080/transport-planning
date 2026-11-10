@@ -21,7 +21,7 @@ import { hiddenJunctions } from '@/core/filter'
 import type { LanePort } from '@/core/lanePick'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
 import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
-import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
+import { buildScene, buildStaticScene, curveMiddle, shapedCurve, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
 import { computeFlows } from '@/core/ridership'
@@ -138,6 +138,9 @@ let map: MlMap | null = null
 let ready = false
 let frame = 0
 let drag: Drag | null = null
+/** Перетаскивание середины выбранного манёвра: форма кривой меняется для всех его полос. */
+let turnDrag: { start: XY; current: XY; moved: boolean } | null = null
+const TURN_HANDLE_PX = 11
 let hover: Hit | null = null
 let cursorSnap: Snap | null = null
 let cursorPosition: LatLon | null = null
@@ -643,7 +646,9 @@ function renderOverlay(): void {
   const turnView = editor.turnPreview
   if (turnView) {
     // Неактивные полосы рисуются первыми, чтобы выбранная полоса лежала сверху
-    const ordered = [...turnView.lanes].sort((a, b) => Number(a.active) - Number(b.active))
+    const extra = turnDrag ? sub(turnDrag.current, turnDrag.start) : null
+    const lanes = turnView.lanes.map((lane) => ({ ...lane, points: extra ? shapedCurve(lane.points, extra) : lane.points }))
+    const ordered = [...lanes].sort((a, b) => Number(a.active) - Number(b.active))
     const starts = new Map<number, { point: XY; active: boolean }>()
     const ends = new Map<number, { point: XY; active: boolean }>()
     for (const lane of ordered) {
@@ -652,6 +657,8 @@ function renderOverlay(): void {
       ends.set(lane.toLane, { point: lane.points.at(-1)!, active: (ends.get(lane.toLane)?.active ?? false) || lane.active })
     }
     for (const item of starts.values()) features.push(pointOf(projector.toLatLon(item.point), { role: 'turn-start', active: item.active }))
+    const handleLane = lanes.find((lane) => lane.active && lane.fromLane >= 0)
+    if (handleLane) features.push(pointOf(projector.toLatLon(curveMiddle(handleLane.points)), { role: 'turn-handle' }))
     for (const item of ends.values()) features.push(pointOf(projector.toLatLon(item.point), { role: 'turn-end', active: item.active }))
   }
   if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
@@ -849,6 +856,12 @@ function constrained(lngLat: LngLat, shift: boolean): LatLon {
 }
 
 function onMouseMove(event: MapMouseEvent): void {
+  if (turnDrag) {
+    turnDrag.current = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
+    turnDrag.moved = true
+    scheduleOverlay()
+    return
+  }
   if (circleDrag) {
     circleDrag.radius = dist(circleDrag.center, editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng }))
     scheduleOverlay()
@@ -1024,6 +1037,12 @@ function selectInside(inside: (node: LatLon) => boolean): void {
   editor.toast(`Выделено объектов: ${merged.length}`)
 }
 
+/** Середина первой активной полосы выбранного манёвра: за неё тянут форму. */
+function turnHandle(): XY | null {
+  const lane = editor.turnPreview?.lanes.find((item) => item.active && item.fromLane >= 0)
+  return lane ? curveMiddle(lane.points) : null
+}
+
 function onMouseDown(event: MapMouseEvent): void {
   insertMenu.value = null
   coordMenu.value = null
@@ -1051,6 +1070,19 @@ function onMouseDown(event: MapMouseEvent): void {
     }
     return
   }
+  // Ручка в середине выбранного манёвра: потянуть — изменить форму траектории
+  if (event.originalEvent.button === 0 && editor.tool === 'select') {
+    const handle = turnHandle()
+    if (handle) {
+      const [lng, lat] = editor.projector!.toLngLat(handle)
+      const screen = map!.project([lng, lat])
+      if (Math.hypot(screen.x - event.point.x, screen.y - event.point.y) <= TURN_HANDLE_PX) {
+        turnDrag = { start: handle, current: handle, moved: false }
+        event.preventDefault()
+        return
+      }
+    }
+  }
   if (event.originalEvent.button !== 0 || editor.tool !== 'select' || event.originalEvent.shiftKey) return
   const hit = pick(event.lngLat)
   if (!hit || hit.kind === 'way') return
@@ -1074,6 +1106,19 @@ function onMouseDown(event: MapMouseEvent): void {
 }
 
 function onMouseUp(event: MapMouseEvent): void {
+  if (turnDrag) {
+    const finished = turnDrag
+    turnDrag = null
+    suppressClick = true
+    setTimeout(() => (suppressClick = false), 0)
+    const delta = sub(finished.current, finished.start)
+    if (finished.moved && Math.hypot(delta.x, delta.y) > 0.2) {
+      const base = editor.turnShape ?? { x: 0, y: 0 }
+      editor.setTurnShape({ x: base.x + delta.x, y: base.y + delta.y })
+    }
+    scheduleOverlay()
+    return
+  }
   if (circleDrag) {
     finishCircle()
     return

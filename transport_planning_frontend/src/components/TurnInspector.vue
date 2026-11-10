@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { crossingConnectors } from '@/core/scene'
 import { type Movement, type TurnKind } from '@/core/topology'
 import { readTurnAttrs, TURN_TSYS, type TurnAttrs } from '@/core/turnAttrs'
 import { useEditor } from '@/stores/editor'
@@ -56,6 +57,14 @@ function addLane(event: Event): void {
   ;(event.target as HTMLSelectElement).value = ''
 }
 
+/** Траектории с этого подхода, которые пересекаются: машины будут уступать друг другу без нужды. */
+const crossings = computed(() =>
+  crossingConnectors(editor.turnConnectors).map(([a, b]) => {
+    const label = (c: (typeof editor.turnConnectors)[number]) => `${KIND_LABELS[c.kind].toLowerCase()} с полосы ${c.from.lanesIn - c.fromLane}`
+    return `${label(a)} и ${label(b)}`
+  }),
+)
+
 function movementState(item: Movement): string {
   const count = lanesOf(item.to.neighbor).length
   if (!item.allowed) return 'запрещён'
@@ -108,6 +117,14 @@ function toggleSystem(system: string): void {
       </select>
     </div>
     <p class="muted rule">Полоса 1 — крайняя правая. Щелчок по траектории на карте выбирает манёвр, повторный щелчок — одну его полосу.</p>
+
+    <h3>Форма траектории</h3>
+    <p class="muted rule">Потяните белую ручку в середине манёвра на карте: кривая меняется для всех его полос. По ней же едут машины в микромодели.</p>
+    <p v-if="editor.turnShape" class="muted">Середина сдвинута на {{ Math.hypot(editor.turnShape.x, editor.turnShape.y).toFixed(1) }} м</p>
+    <button v-if="editor.turnShape" class="btn small block" @click="editor.setTurnShape(null)">Вернуть расчётную форму</button>
+    <ul v-if="crossings.length" class="crossings">
+      <li v-for="(item, index) in crossings" :key="index">Пересекаются траектории: {{ item }}</li>
+    </ul>
 
     <h3>Атрибуты</h3>
     <label class="field">
@@ -203,6 +220,12 @@ h3 {
 }
 .rule {
   margin-top: 8px;
+}
+.crossings {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--warn, #f59e0b);
+  font-size: 11.5px;
 }
 .move .state.none {
   color: var(--warn, #f59e0b);

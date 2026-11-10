@@ -19,6 +19,7 @@ import {
   unit,
   cross,
   nearestOnSegment,
+  segmentsCross,
 } from './geo'
 import {
   type DividerMode,
@@ -43,7 +44,7 @@ import {
 } from './topology'
 import { armHasNode, readMainRoad } from './priority'
 import { reducedSections, SECTION_SPEEDS } from './traffic'
-import type { OWay, XY } from './types'
+import type { OWay, Tags, XY } from './types'
 
 export type SceneLayer =
   | 'surface'
@@ -453,6 +454,80 @@ export function turnCurve(start: XY, travelIn: XY, end: XY, travelOut: XY): XY[]
   })
 }
 
+/**
+ * Форма манёвра, заданная вручную: смещение середины траектории в метрах (восток, север).
+ * Хранится на узле тегом tp:turn_shape: «откуда>куда:dx,dy;…», где откуда и куда — узлы на подходах.
+ * Узел ищется на всём отрезке подхода, поэтому вставка узла или разрез дороги форму не теряют.
+ */
+export const TURN_SHAPE_TAG = 'tp:turn_shape'
+
+export interface TurnShape {
+  from: number
+  to: number
+  dx: number
+  dy: number
+}
+
+export function readTurnShapes(tags: Tags | undefined): TurnShape[] {
+  const shapes: TurnShape[] = []
+  for (const part of (tags?.[TURN_SHAPE_TAG] ?? '').split(';')) {
+    const match = /^\s*(-?\d+)>(-?\d+):(-?[\d.]+),(-?[\d.]+)\s*$/.exec(part)
+    if (match) shapes.push({ from: Number(match[1]), to: Number(match[2]), dx: Number(match[3]), dy: Number(match[4]) })
+  }
+  return shapes
+}
+
+export function writeTurnShape(tags: Tags | undefined, from: number, to: number, delta: XY | null): Tags {
+  const next = { ...(tags ?? {}) }
+  const shapes = readTurnShapes(tags).filter((item) => !(item.from === from && item.to === to))
+  if (delta && Math.hypot(delta.x, delta.y) >= 0.05) shapes.push({ from, to, dx: Math.round(delta.x * 10) / 10, dy: Math.round(delta.y * 10) / 10 })
+  if (shapes.length === 0) delete next[TURN_SHAPE_TAG]
+  else next[TURN_SHAPE_TAG] = shapes.map((item) => `${item.from}>${item.to}:${item.dx},${item.dy}`).join(';')
+  return next
+}
+
+/**
+ * Кривая манёвра с середины, сдвинутой на delta. Концы остаются на полосах.
+ * Середина квадратичной кривой M = (A + 2C + B) / 4, отсюда опорная точка C = 2M − (A + B) / 2.
+ */
+export function shapedCurve(points: XY[], delta: XY | null): XY[] {
+  if (!delta || points.length < 3) return points
+  const start = points[0]!
+  const end = points.at(-1)!
+  const middle = points[Math.floor((points.length - 1) / 2)]!
+  const target = add(middle, delta)
+  const control = sub(scale(target, 2), scale(add(start, end), 0.5))
+  return quadraticCurve(start, control, end, Math.max(CURVE_STEPS, points.length - 1))
+}
+
+/** Середина траектории: за неё тянут, чтобы изменить форму манёвра. */
+export function curveMiddle(points: XY[]): XY {
+  return points[Math.floor((points.length - 1) / 2)]!
+}
+
+/**
+ * Пары траекторий с одного подхода, которые пересекаются внутри узла, кроме общих начала и конца.
+ * С одного подхода машины едут параллельно, и такое пересечение заставляет их уступать друг другу зря.
+ */
+export function crossingConnectors(connectors: Connector[]): [Connector, Connector][] {
+  const result: [Connector, Connector][] = []
+  for (let i = 0; i < connectors.length; i++) {
+    for (let j = i + 1; j < connectors.length; j++) {
+      const a = connectors[i]!
+      const b = connectors[j]!
+      if (a.from !== b.from || a.fromLane === b.fromLane || (a.to === b.to && a.toLane === b.toLane)) continue
+      let crossed = false
+      for (let p = 1; p < a.points.length && !crossed; p++) {
+        for (let q = 1; q < b.points.length && !crossed; q++) {
+          if (segmentsCross(a.points[p - 1]!, a.points[p]!, b.points[q - 1]!, b.points[q]!)) crossed = true
+        }
+      }
+      if (crossed) result.push([a, b])
+    }
+  }
+  return result
+}
+
 /** Соединение полосы подхода с полосой выезда внутри узла. */
 export interface Connector {
   node: number
@@ -478,6 +553,11 @@ export function junctionConnectors(
   const restrictions = restrictionsAt(doc, node)
   const explicit = connectivityAt(doc, node)
   const connectors: Connector[] = []
+  const shapes = readTurnShapes(doc.nodes.get(node)?.tags)
+  const shapeOf = (from: Arm, to: Arm): XY | null => {
+    const shape = shapes.find((item) => armHasNode(from, item.from) && armHasNode(to, item.to))
+    return shape ? { x: shape.dx, y: shape.dy } : null
+  }
   // Стык двух дорог — это продолжение одной дороги, а не поворот
   const continuation = arms.length === 2
 
@@ -519,7 +599,7 @@ export function junctionConnectors(
             toLane,
             kind,
             // Направления берутся там, где полоса обрезана, а не у центра узла: дорога может изгибаться
-            points: turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir),
+            points: shapedCurve(turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir), shapeOf(from, to)),
           })
         })
       }

@@ -593,6 +593,13 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#ffffff',
       'circle-stroke-opacity': ['case', ['get', 'active'], 1, 0.4],
     } },
+    // Ручка формы манёвра: белый круг с синей каймой, его тянут мышью
+    { id: 'overlay-turn-handle', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'turn-handle'], paint: {
+      'circle-radius': 7,
+      'circle-color': '#ffffff',
+      'circle-stroke-color': '#2563eb',
+      'circle-stroke-width': 3,
+    } },
     { id: 'overlay-select-fill', type: 'fill', source: 'overlay', filter: ['==', ['get', 'role'], 'select-area'], paint: {
       'fill-color': 'rgba(56,189,248,0.14)',
     } },

@@ -59,6 +59,7 @@ import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
 import { applyJunctionPriority, type PrioritySign } from '@/core/priority'
+import { readTurnShapes, writeTurnShape } from '@/core/scene'
 import { applyPrioritySigns, type PrioritySuggestion } from '@/core/prioritySuggest'
 import {
   AREA_REACH_M,
@@ -863,6 +864,24 @@ export const useEditor = defineStore('editor', () => {
     return nodeConnectors(d, p, turn.node).connectors.filter((c) => c.from.neighbor === turn.from)
   })
 
+  /** Сдвиг середины выбранного манёвра, заданный вручную, м. */
+  const turnShape = computed<XY | null>(() => {
+    void rev.value
+    const turn = selectedTurn.value
+    const tags = turn ? doc.value?.nodes.get(turn.node)?.tags : undefined
+    const shape = turn ? readTurnShapes(tags).find((item) => item.from === turn.from && item.to === turn.to) : undefined
+    return shape ? { x: shape.dx, y: shape.dy } : null
+  })
+
+  /** Форма манёвра: середина траектории сдвинута на delta; null возвращает расчётную кривую. */
+  function setTurnShape(delta: XY | null): void {
+    const turn = selectedTurn.value
+    if (!turn) return
+    mutate(delta ? 'Форма манёвра' : 'Сброс формы манёвра', (d) =>
+      setNodeTags(d, turn.node, writeTurnShape(d.node(turn.node).tags, turn.from, turn.to, delta)),
+    )
+  }
+
   function setTurnLane(fromLane: number, toLane: number, enabled: boolean): void {
     const turn = selectedTurn.value
     if (!turn) return
@@ -1591,6 +1610,8 @@ export const useEditor = defineStore('editor', () => {
     turnPreview,
     turnConnectors,
     setTurnLane,
+    turnShape,
+    setTurnShape,
     setTurnAllowed,
     applyTurnTemplate,
     updateTurnAttrs,
