@@ -3,7 +3,8 @@ import { maxSlopePercent } from './elevation'
 import { dist, nearestOnSegment, Projector, segmentsCross } from './geo'
 import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
-import { wayLevel } from './topology'
+import { checkHiddenUturns, checkMissingOneway, checkRestrictionBypass, checkTransitRoutes } from './networkChecks'
+import { buildNetwork, wayLevel } from './topology'
 import { buildStopHierarchy, stopIssues } from './stops'
 import type { LatLon, ORelation, OWay, XY } from './types'
 
@@ -29,6 +30,11 @@ export type IssueCode =
   | 'steep_slope'
   | 'lane_change_mismatch'
   | 'stop_hierarchy'
+  | 'hidden_uturn'
+  | 'restriction_bypass'
+  | 'transit_access'
+  | 'transit_against_oneway'
+  | 'missing_oneway'
 
 export interface Issue {
   id: string
@@ -62,6 +68,11 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   steep_slope: 'Слишком крутой уклон',
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
   stop_hierarchy: 'Иерархия остановок',
+  hidden_uturn: 'Разворот через короткий съезд',
+  restriction_bypass: 'Запрет обходится через соседний въезд',
+  transit_access: 'Маршрут ОТ по закрытой для него дороге',
+  transit_against_oneway: 'Маршрут ОТ против одностороннего движения',
+  missing_oneway: 'Вторая проезжая часть без oneway',
 }
 
 const BROKEN_JUNCTION_M = 4
@@ -121,6 +132,11 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkRestrictions(context)
   checkSlopes(context)
   checkStops(doc, projector, context.issues)
+  const network = buildNetwork(doc, projector)
+  checkHiddenUturns(doc, network, context.issues)
+  checkRestrictionBypass(doc, network, context.issues)
+  checkTransitRoutes(doc, context.issues)
+  checkMissingOneway(doc, projector, ways, context.issues)
 
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   return context.issues.sort((a, b) => order[a.severity] - order[b.severity])

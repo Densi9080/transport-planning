@@ -230,5 +230,6 @@ describe('настоящий файл', () => {
       expect(car).toBeInstanceOf(Car)
     }
     expect(net.edges.some((edge) => edge.lanes[0] instanceof SimLane)).toBe(true)
-  })
+    // 10 минут модельного времени: тест о поведении машин, а не о скорости, и при параллельных тестах ему нужен запас
+  }, 30_000)
 })

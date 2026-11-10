@@ -76,6 +76,22 @@ export async function runPreflight(id: string, changes: Changes): Promise<Prefli
   ).json()
 }
 
+export interface SumoSignalsResult {
+  available: boolean
+  message?: string
+  ok?: boolean
+  xml?: string
+  netconvert?: string
+  written?: { id: string; cycle: number; phases: number; links: number; mapped: number; conflicts: number }[]
+  skipped?: { id: string; reason: string }[]
+}
+
+export async function exportSumoSignals(id: string, changes: Changes, groups: unknown): Promise<SumoSignalsResult> {
+  return (
+    await ensureOk(await fetch(`/api/projects/${id}/sumo-signals/`, jsonRequest('POST', { changes, groups })))
+  ).json()
+}
+
 export interface TrafficLane {
   edge: string
   way: string
