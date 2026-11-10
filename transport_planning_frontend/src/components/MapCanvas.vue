@@ -647,6 +647,9 @@ function renderOverlay(): void {
     features.push(pointOf(projector.toLatLon(turnView.end), { role: 'turn-end' }))
   }
   if (editor.selectedLane) features.push(lineOf(editor.selectedLane.points, { role: 'hover', px: 8 }))
+  for (const sign of editor.signPreview) {
+    features.push(pointOf(sign, { role: 'sign-preview', chosen: sign.chosen, focused: sign.focused }))
+  }
   for (const node of editor.selectedNodes) features.push(pointOf(node, { role: 'node-selected' }))
 
   // Предложения помощника видны на карте, пока человек не решил, применять ли их
@@ -1851,6 +1854,7 @@ watch(() => editor.hidden, () => {
 })
 watch(() => [editor.selectedLineId, editor.layers.transit], renderTransit)
 watch(() => editor.transitLoadShown, renderTransitLoad)
+watch(() => editor.signPreview, () => scheduleOverlay())
 watch(() => editor.selectedStopId, () => {
   if (ready && editor.doc) setData('netStops', { type: 'FeatureCollection', features: stopObjectFeatures() })
 })

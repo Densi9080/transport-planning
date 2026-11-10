@@ -58,6 +58,7 @@ import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
+import { applyPrioritySigns, type PrioritySuggestion } from '@/core/prioritySuggest'
 import {
   AREA_REACH_M,
   areaKey,
@@ -1388,6 +1389,17 @@ export const useEditor = defineStore('editor', () => {
     }
   }
 
+  /** Окно черновой расстановки знаков приоритета. */
+  const prioritySuggestOpen = ref(false)
+  /** Предлагаемые знаки на карте, пока окно открыто. */
+  const signPreview = shallowRef<(LatLon & { chosen: boolean; focused: boolean })[]>([])
+
+  function applyPrioritySuggestions(items: PrioritySuggestion[]): void {
+    if (items.length === 0) return
+    const placed = mutate(`Знаки «Уступи дорогу»: ${items.length}`, (d, p) => applyPrioritySigns(d, p, items))
+    if (placed) toast(`Поставлено знаков: ${placed.length}. Отменить все сразу: Ctrl+Z`, 'success')
+  }
+
   function placeSign(target: { nodeId?: number; wayId?: number; position: LatLon }): void {
     const kind = trafficOptions.signKind
     const placed = mutate('Знак приоритета', (d, p) => toggleSign(d, p, target, kind))
@@ -1677,6 +1689,9 @@ export const useEditor = defineStore('editor', () => {
     pickSpeedPoint,
     placeBump,
     placeSign,
+    prioritySuggestOpen,
+    signPreview,
+    applyPrioritySuggestions,
     smoothSelected,
     parallelSelected,
     duplicateSelected,

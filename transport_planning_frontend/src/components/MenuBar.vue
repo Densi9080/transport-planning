@@ -113,6 +113,7 @@ const menus = computed<Menu[]>(() => [
       { label: 'Участок скорости', hint: 'S', checked: editor.tool === 'speed', action: () => editor.setTool('speed') },
       { label: 'Лежачий полицейский', hint: 'L', checked: editor.tool === 'bump', action: () => editor.setTool('bump') },
       { label: 'Знак приоритета', hint: 'P', checked: editor.tool === 'sign', action: () => editor.setTool('sign') },
+      { label: 'Предложить знаки «Уступи дорогу»…', checked: editor.prioritySuggestOpen, action: () => (editor.prioritySuggestOpen = !editor.prioritySuggestOpen) },
       { label: 'Мост', hint: 'B', checked: editor.tool === 'bridge', action: () => editor.setTool('bridge') },
       { label: 'Тоннель', hint: 'G', checked: editor.tool === 'tunnel', action: () => editor.setTool('tunnel') },
       separator,

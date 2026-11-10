@@ -6,6 +6,7 @@ import AssistantSettingsDialog from '@/components/AssistantSettingsDialog.vue'
 import CompareMap from '@/components/CompareMap.vue'
 import ConsoleDock from '@/components/ConsoleDock.vue'
 import CrsDialog from '@/components/CrsDialog.vue'
+import PrioritySuggestPanel from '@/components/PrioritySuggestPanel.vue'
 import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 import ExportDialog from '@/components/ExportDialog.vue'
 import HelpDialog from '@/components/HelpDialog.vue'
@@ -255,6 +256,7 @@ watch(
             <CompareMap v-if="editor.compareOpen" />
             <TrafficOptions />
             <MapBalance />
+            <PrioritySuggestPanel v-if="editor.prioritySuggestOpen && editor.viewMode !== 'sim'" />
             <ToolDock v-if="editor.viewMode !== 'sim'" />
             <div class="toasts" aria-live="polite">
               <div v-for="item in editor.toasts" :key="item.id" class="toast" :class="item.tone">

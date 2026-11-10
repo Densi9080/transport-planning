@@ -578,6 +578,13 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-color': '#facc15',
       'line-width': 2,
     } },
+    // Предлагаемый знак «Уступи дорогу»: отмеченный — жёлтый с красной каймой, как сам знак
+    { id: 'overlay-sign-preview', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'sign-preview'], paint: {
+      'circle-radius': ['case', ['get', 'focused'], 9, 6],
+      'circle-color': ['case', ['get', 'chosen'], '#fde047', 'rgba(0,0,0,0)'],
+      'circle-stroke-color': ['case', ['get', 'chosen'], '#dc2626', '#a1a1aa'],
+      'circle-stroke-width': ['case', ['get', 'focused'], 3, 2],
+    } },
     { id: 'overlay-ghost', type: 'circle', source: 'overlay', filter: ['==', ['get', 'role'], 'ghost'], paint: {
       'circle-radius': 7,
       'circle-color': 'rgba(250,204,21,0.25)',
