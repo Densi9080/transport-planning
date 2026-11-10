@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import { laneNumber } from '@/core/lanePick'
 import { readLaneValue, writeLaneValue } from '@/core/laneTags'
 import type { OWay } from '@/core/types'
 import { useEditor } from '@/stores/editor'
@@ -20,8 +21,8 @@ function setSpeed(value: string): void {
 
 <template>
   <div v-if="lane" class="section">
-    <h2>Полоса {{ lane.lane + 1 }}</h2>
-    <p class="muted">{{ lane.forward ? 'По направлению линии' : 'Против направления линии' }}, счёт слева направо по ходу движения</p>
+    <h2>Полоса {{ laneNumber(lane.lane, lane.count) }} из {{ lane.count }}</h2>
+    <p class="muted">{{ lane.forward ? 'По направлению линии' : 'Против направления линии' }}. Полоса 1 крайняя правая по ходу движения</p>
     <label class="field">
       <span>Скорость полосы, км/ч</span>
       <input class="input" type="number" min="0" step="5" :value="speed" :placeholder="tags.maxspeed ?? 'как у дороги'" @change="setSpeed(($event.target as HTMLInputElement).value)" />

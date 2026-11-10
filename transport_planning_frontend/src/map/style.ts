@@ -39,6 +39,8 @@ export const SOURCE_IDS = [
   'other',
   'points',
   'transitLines',
+  'transitLoad',
+  'transitLoadLabels',
   'transitStops',
   'transitLabels',
   'graphLinks',
@@ -320,6 +322,17 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'line-color': '#7c3aed',
       'line-width': ['interpolate', ['linear'], ['get', 'count'], 1, 1.5, 12, 7],
       'line-opacity': 0.55,
+    } },
+    // Эпюра наполнения: полоса справа по ходу движения, толщина пропорциональна потоку на перегоне
+    { id: 'transit-load', type: 'line', source: 'transitLoad', layout: { 'line-cap': 'butt', 'line-join': 'round' }, paint: {
+      'line-color': ['case', ['>', ['get', 'fill'], 1], '#dc2626', '#2563eb'],
+      'line-width': ['get', 'width'],
+      'line-offset': ['+', ['/', ['get', 'width'], 2], 4],
+      'line-opacity': 0.6,
+    } },
+    { id: 'transit-load-labels', type: 'symbol', source: 'transitLoadLabels', layout: {
+      'icon-image': ['get', 'image'],
+      'icon-allow-overlap': false,
     } },
     { id: 'transit-selected', type: 'line', source: 'transitLines', filter: ['==', ['get', 'selected'], true], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': ['get', 'color'],

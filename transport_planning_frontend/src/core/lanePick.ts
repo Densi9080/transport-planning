@@ -42,8 +42,10 @@ export interface LaneHit {
   link: Link
   /** Движение по ходу порядка узлов дороги. */
   forward: boolean
-  /** Номер полосы слева направо по ходу движения. */
+  /** Индекс полосы слева направо по ходу движения: в этом порядке полосы лежат в тегах OSM. */
   lane: number
+  /** Полос в этом направлении. */
+  count: number
   offset: number
 }
 
@@ -79,13 +81,21 @@ export function laneAtPoint(network: Network, point: XY): LaneHit | null {
       const gap = Math.abs(best!.lateral - offset)
       if (gap < closest) {
         closest = gap
-        result = { link: best!.link, forward, lane, offset }
+        result = { link: best!.link, forward, lane, count: list.length, offset }
       }
     })
   }
   scan(offsets.forward, true)
   scan(offsets.backward, false)
   return result
+}
+
+/**
+ * Номер полосы для человека: первая полоса крайняя правая по ходу движения, как в Visum и ПДД.
+ * Индекс в тегах OSM идёт наоборот, слева направо.
+ */
+export function laneNumber(index: number, count: number): number {
+  return count - index
 }
 
 export function lanePolyline(hit: Pick<LaneHit, 'link' | 'offset'>): XY[] {

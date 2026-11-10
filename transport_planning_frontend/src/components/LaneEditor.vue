@@ -115,31 +115,31 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
           class="divider"
           :class="dividerOf(direction.id, index - 1)"
           :title="`${DIVIDER_TITLES[dividerOf(direction.id, index - 1)]}. Нажмите, чтобы сменить`"
-          :aria-label="`Линия между полосами ${index} и ${index + 1}: ${DIVIDER_TITLES[dividerOf(direction.id, index - 1)]}`"
+          :aria-label="`Линия между полосами ${direction.lanes.length - index + 1} и ${direction.lanes.length - index}: ${DIVIDER_TITLES[dividerOf(direction.id, index - 1)]}`"
           @click="cycleDivider(direction.id, index - 1)"
         >
           <i /><i />
         </button>
         <div class="lane">
-          <span class="lane-number">{{ index + 1 }}</span>
+          <span class="lane-number">{{ direction.lanes.length - index }}</span>
           <button
             v-for="button in buttons"
             :key="button.turn"
             class="turn"
             :class="{ on: turnAllows(lane, button.check) }"
             :aria-pressed="turnAllows(lane, button.check)"
-            :aria-label="`Полоса ${index + 1}: ${button.label}`"
+            :aria-label="`Полоса ${direction.lanes.length - index}: ${button.label}`"
             :title="button.label"
             @click="toggle(direction.id, direction.lanes, index, button.turn)"
           >
             <component :is="button.icon" :size="14" />
           </button>
-          <div class="width" role="group" :aria-label="`Ширина полосы ${index + 1}`">
+          <div class="width" role="group" :aria-label="`Ширина полосы ${direction.lanes.length - index}`">
             <button aria-label="Уже" :disabled="widthOf(direction.id, index) <= MIN_LANE_WIDTH" @click="setWidth(direction.id, index, widthOf(direction.id, index) - WIDTH_STEP)"><Minus :size="10" /></button>
             <input
               :value="widthOf(direction.id, index).toFixed(2)"
               inputmode="decimal"
-              :aria-label="`Ширина полосы ${index + 1}, метров`"
+              :aria-label="`Ширина полосы ${direction.lanes.length - index}, метров`"
               :title="`От ${MIN_LANE_WIDTH} до ${MAX_LANE_WIDTH} м`"
               @change="setWidth(direction.id, index, Number.parseFloat(($event.target as HTMLInputElement).value.replace(',', '.')))"
             />
@@ -150,7 +150,8 @@ function toggle(direction: TravelDirection, lanes: string[], index: number, turn
       </div>
     </div>
     <p class="faint note">
-      Полосы идут слева направо по ходу движения. Манёвры пишутся в turn:lanes. Полоса без отметок
+      Полосы нарисованы так, как их видит водитель, а номер 1 у крайней правой. В turn:lanes
+      порядок по правилам OSM обратный: слева направо. Полоса без отметок
       даёт симулятору выбрать манёвр самому. Линия между полосами меняется щелчком и пишется в
       change:lanes. Точные соединения полос настраиваются в редакторе узла.
     </p>

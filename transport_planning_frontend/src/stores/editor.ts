@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+import { acceptHMRUpdate, defineStore } from 'pinia'
 import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 
 import { loadProject, saveChanges } from '@/api'
@@ -229,7 +229,7 @@ export const useEditor = defineStore('editor', () => {
   const objectFilter = reactive<Partial<Record<NetObject, ObjectFilter>>>({})
   /** Куда пользователь хотел перейти, пока не решил судьбу несохранённых правок. */
   const leaveRequest = ref<EditMode | 'sim' | null>(null)
-  const selectedLane = shallowRef<{ wayId: number; forward: boolean; lane: number; points: XY[] } | null>(null)
+  const selectedLane = shallowRef<{ wayId: number; forward: boolean; lane: number; count: number; points: XY[] } | null>(null)
   const consoleLog = shallowRef<ConsoleEntry[]>([])
   const viewMode = ref<ViewMode>('engineering')
   const selection = shallowRef<SelectedItem[]>([])
@@ -313,6 +313,8 @@ export const useEditor = defineStore('editor', () => {
   const junctionNode = ref<number | null>(null)
   const junctionTab = ref<'lanes' | 'signal'>('lanes')
   const selectedLineId = ref<number | null>(null)
+  /** Эпюра наполнения выбранного маршрута на карте. */
+  const transitLoadShown = ref(true)
   const cursor = shallowRef<LatLon | null>(null)
   const filterRules = ref<FilterRule[]>([])
   const rightTab = ref<'quick' | 'assistant'>('quick')
@@ -719,7 +721,7 @@ export const useEditor = defineStore('editor', () => {
   function pickLane(wayId: number, point: XY): void {
     const net = network.value
     const hit = net ? laneAtPoint(net, point) : null
-    selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, points: lanePolyline(hit) } : null
+    selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, count: hit.count, points: lanePolyline(hit) } : null
   }
 
   function selectTurn(node: number, from: number, to: number): void {
@@ -1476,6 +1478,7 @@ export const useEditor = defineStore('editor', () => {
     openJunction,
     selectedLineId,
     selectedLine,
+    transitLoadShown,
     lines,
     cursor,
     filterRules,
@@ -1572,3 +1575,6 @@ export const useEditor = defineStore('editor', () => {
     duplicateSelected,
   }
 })
+
+// Без этого при правке хранилища открытая вкладка держит старый экземпляр без новых полей
+if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useEditor, import.meta.hot))

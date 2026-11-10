@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { BusFront, MapPinPlus, Plus, Search, Trash2, X } from 'lucide-vue-next'
+import { BusFront, CalendarClock, MapPinPlus, Plus, Search, Trash2, X } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
+import { computeFlows, estimateFlows, readFlowList, writeFlowLists } from '@/core/ridership'
+import { formatClock, type IntervalPeriod, parseClock, writeIntervalPeriods, writeServiceWindow } from '@/core/timetable'
 import { DEFAULT_INTERVAL_MIN, TRANSIT_MODE_LABELS, type TransitMode } from '@/core/transit'
 import { computeRoute, DEFAULT_DWELL_S, groupLines, oppositeRoute, routeParams, writeProfileValue } from '@/core/transitCalc'
 import { useEditor } from '@/stores/editor'
 import { useSimulation } from '@/stores/simulation'
+
+import TimetableDialog from './TimetableDialog.vue'
 
 const editor = useEditor()
 const sim = useSimulation()
@@ -36,12 +40,97 @@ const route = computed(() => {
 })
 const params = computed(() => (line.value ? routeParams(line.value) : null))
 
-const PARAM_FIELDS: { key: string; label: string; field: 'speedKmh' | 'vehicleCapacity' | 'layoverMin' | 'hoursPerDay' }[] = [
+const PARAM_FIELDS: { key: string; label: string; field: 'speedKmh' | 'vehicleCapacity' | 'layoverMin' }[] = [
   { key: 'tp:speed', label: 'Скорость на перегоне, км/ч', field: 'speedKmh' },
   { key: 'tp:vehcap', label: 'Вместимость машины, чел.', field: 'vehicleCapacity' },
   { key: 'tp:layover', label: 'Отстой на конечной, мин', field: 'layoverMin' },
-  { key: 'tp:hours', label: 'Часов работы в сутки', field: 'hoursPerDay' },
 ]
+
+const timetableOpen = ref(false)
+const estimateTotal = ref(300)
+
+function setWindow(which: 'first' | 'last', event: Event): void {
+  if (!line.value || !params.value) return
+  const value = parseClock((event.target as HTMLInputElement).value)
+  if (value === null) {
+    editor.toast('Время указывается как ЧЧ:ММ', 'error')
+    return
+  }
+  const window = params.value.window
+  const first = which === 'first' ? value : window.firstMin
+  let last = which === 'last' ? value : window.lastMin % 1440
+  // Последний рейс раньше первого означает работу за полночь
+  if (last <= first) last += 1440
+  editor.updateLineTags(line.value.id, writeServiceWindow(line.value.tags, first, last), 'Время работы маршрута')
+}
+
+function savePeriods(periods: IntervalPeriod[]): void {
+  if (!line.value) return
+  editor.updateLineTags(line.value.id, writeIntervalPeriods(line.value.tags, periods), 'Интервалы по периодам')
+}
+
+function addPeriod(): void {
+  if (!params.value || !line.value) return
+  const interval = Math.max(1, Math.round(line.value.interval / 2))
+  savePeriods([...params.value.periods, { fromMin: 7 * 60, toMin: 10 * 60, interval }])
+}
+
+function editPeriod(index: number, field: 'from' | 'to' | 'interval', event: Event): void {
+  if (!params.value) return
+  const raw = (event.target as HTMLInputElement).value
+  const periods = params.value.periods.map((p) => ({ ...p }))
+  const period = periods[index]!
+  if (field === 'interval') {
+    const value = Number(raw)
+    if (!(value > 0)) return
+    period.interval = value
+  } else {
+    const value = parseClock(raw)
+    if (value === null) return
+    if (field === 'from') period.fromMin = value
+    else period.toMin = value <= period.fromMin ? value + 1440 : value
+  }
+  savePeriods(periods)
+}
+
+function removePeriod(index: number): void {
+  if (!params.value) return
+  savePeriods(params.value.periods.filter((_, i) => i !== index))
+}
+
+const flows = computed(() => {
+  if (!line.value || !route.value || !params.value) return null
+  return computeFlows(line.value.tags, route.value.profile, route.value.peakCapacityPerHour, params.value.vehicleCapacity)
+})
+
+function setFlow(key: 'tp:board' | 'tp:alight', index: number, event: Event): void {
+  if (!line.value || !route.value) return
+  const count = route.value.profile.length
+  const board = readFlowList(line.value.tags, 'tp:board', count)
+  const alight = readFlowList(line.value.tags, 'tp:alight', count)
+  const raw = (event.target as HTMLInputElement).value.trim()
+  const value = raw === '' ? null : Math.max(0, Number(raw))
+  if (value !== null && !Number.isFinite(value)) return
+  ;(key === 'tp:board' ? board : alight)[index] = value
+  editor.updateLineTags(line.value.id, writeFlowLists(line.value.tags, board, alight), 'Пассажиропоток')
+}
+
+function fillEstimate(): void {
+  if (!line.value || !route.value) return
+  const { board, alight } = estimateFlows(route.value.profile.length, estimateTotal.value)
+  editor.updateLineTags(line.value.id, writeFlowLists(line.value.tags, board, alight), 'Оценка пассажиропотока')
+  editor.toast('Вход и выход заполнены равномерной оценкой. Замените их данными обследования, когда они будут')
+}
+
+function clearFlows(): void {
+  if (!line.value || !route.value) return
+  const empty = route.value.profile.map(() => null)
+  editor.updateLineTags(line.value.id, writeFlowLists(line.value.tags, empty, empty), 'Очистка пассажиропотока')
+}
+
+function percent(value: number): string {
+  return `${Math.round(value * 100)}%`
+}
 
 function setParam(key: string, event: Event): void {
   if (!line.value) return
@@ -217,8 +306,9 @@ function deleteSelected(): void {
         <div><dt>Рейсов в час</dt><dd>{{ route.tripsPerHour.toFixed(1) }}</dd></div>
         <div><dt>Провозная способность</dt><dd>{{ Math.round(route.capacityPerHour) }} чел/ч</dd></div>
         <div><dt>Оборотный рейс</dt><dd>{{ clock(route.roundTripS) }}{{ route.hasOpposite ? '' : ', встречного нет: принято то же время' }}</dd></div>
-        <div><dt>Машин на линии</dt><dd>{{ route.vehicles }}</dd></div>
-        <div><dt>Рейсов в сутки</dt><dd>{{ Math.round(route.tripsPerDay) }}</dd></div>
+        <div v-if="route.peakIntervalMin < line.interval"><dt>Интервал в пик</dt><dd>{{ route.peakIntervalMin }} мин, {{ Math.round(route.peakCapacityPerHour) }} чел/ч</dd></div>
+        <div><dt>Машин на линии{{ route.peakIntervalMin < line.interval ? ' в пик' : '' }}</dt><dd>{{ route.vehicles }}</dd></div>
+        <div><dt>Рейсов в сутки</dt><dd>{{ route.tripsPerDay }}</dd></div>
         <div><dt>Пробег в сутки</dt><dd>{{ Math.round(route.vehicleKmPerDay) }} км</dd></div>
       </dl>
       <div class="grid-2">
@@ -226,6 +316,38 @@ function deleteSelected(): void {
           <label>{{ item.label }}</label>
           <input class="input" type="number" min="0" :value="params[item.field]" @change="setParam(item.key, $event)" />
         </div>
+      </div>
+
+      <h3 class="head">Расписание</h3>
+      <div class="grid-2">
+        <div class="field">
+          <label for="line-first">Первый рейс</label>
+          <input id="line-first" class="input" type="time" :value="formatClock(params.window.firstMin % 1440)" @change="setWindow('first', $event)" />
+        </div>
+        <div class="field">
+          <label for="line-last">Последний рейс</label>
+          <input id="line-last" class="input" type="time" :value="formatClock(params.window.lastMin % 1440)" @change="setWindow('last', $event)" />
+        </div>
+      </div>
+      <p v-if="!params.window.tagged" class="muted info">Времени работы нет в файле: принято 06:00–22:00.</p>
+      <div class="periods">
+        <div class="period-head muted"><span>Период</span><span>Интервал, мин</span></div>
+        <div class="period base"><span>Остальное время</span><span>{{ line.interval }}</span><span /></div>
+        <div v-for="(period, index) in params.periods" :key="index" class="period">
+          <span class="times">
+            <input class="input" type="time" :value="formatClock(period.fromMin % 1440)" :aria-label="`Начало периода ${index + 1}`" @change="editPeriod(index, 'from', $event)" />
+            –
+            <input class="input" type="time" :value="formatClock(period.toMin % 1440)" :aria-label="`Конец периода ${index + 1}`" @change="editPeriod(index, 'to', $event)" />
+          </span>
+          <input class="input num" type="number" min="1" :value="period.interval" :aria-label="`Интервал периода ${index + 1}`" @change="editPeriod(index, 'interval', $event)" />
+          <button class="btn ghost small" :aria-label="`Удалить период ${index + 1}`" @click="removePeriod(index)"><X :size="11" /></button>
+        </div>
+      </div>
+      <div class="grid-2">
+        <button class="btn small" @click="addPeriod"><Plus :size="12" aria-hidden="true" /> Период пик</button>
+        <button class="btn small primary" :disabled="route.departures.length === 0" @click="timetableOpen = true">
+          <CalendarClock :size="12" aria-hidden="true" /> Расписание рейсов
+        </button>
       </div>
       <h3 class="head">Профиль времени</h3>
       <table class="profile">
@@ -241,6 +363,43 @@ function deleteSelected(): void {
           </tr>
         </tbody>
       </table>
+
+      <template v-if="flows">
+        <h3 class="head">Пассажиропотоки в час пик</h3>
+        <table class="profile">
+          <thead><tr><th>№</th><th>Пункт</th><th>Вошло</th><th>Вышло</th><th>Едет дальше</th></tr></thead>
+          <tbody>
+            <tr v-for="(point, index) in route.profile" :key="`f-${point.node}-${index}`" :class="{ max: flows.maxSpan === index, short: flows.shortageAt === index }">
+              <td>{{ index + 1 }}</td>
+              <td class="name ellipsis">{{ point.name }}</td>
+              <td><input v-if="index < route.profile.length - 1" class="input" type="number" min="0" :value="flows.hasData ? flows.stops[index]!.board : ''" @change="setFlow('tp:board', index, $event)" /></td>
+              <td><input v-if="index > 0" class="input" type="number" min="0" :value="flows.hasData ? flows.stops[index]!.alight : ''" @change="setFlow('tp:alight', index, $event)" /></td>
+              <td>{{ index < route.profile.length - 1 && flows.hasData ? `${Math.round(flows.stops[index]!.loadAfter)} · ${percent(flows.spans[index]!.fill)}` : '' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted info">Пасс/ч. Наполнение считается от провозной способности при интервале {{ route.peakIntervalMin }} мин.</p>
+        <p v-if="flows.shortageAt !== null" class="bad info">На пункте {{ flows.shortageAt + 1 }} выходит больше, чем едет: выход урезан до числа едущих.</p>
+        <p v-else-if="flows.hasData && !flows.balanced" class="bad info">Вошло {{ Math.round(flows.boardings) }}, вышло {{ Math.round(flows.alightings) }}: вход и выход не сходятся.</p>
+        <dl v-if="flows.hasData">
+          <div><dt>Перевезено за час</dt><dd>{{ Math.round(flows.boardings) }} пасс.</dd></div>
+          <div><dt>Пассажирооборот</dt><dd>{{ Math.round(flows.passengerKm) }} пасс·км</dd></div>
+          <div><dt>Средняя дальность поездки</dt><dd>{{ flows.avgTripKm.toFixed(2) }} км</dd></div>
+          <div><dt>Коэффициент сменности</dt><dd>{{ flows.turnover.toFixed(2) }}</dd></div>
+          <div><dt>Наибольший поток на перегоне</dt><dd>{{ Math.round(flows.maxLoad) }} пасс/ч, перегон {{ (flows.maxSpan ?? 0) + 1 }}–{{ (flows.maxSpan ?? 0) + 2 }}</dd></div>
+          <div><dt>Наполнение на нём</dt><dd :class="{ bad: flows.maxFill > 1 }">{{ percent(flows.maxFill) }}</dd></div>
+          <div><dt>Неравномерность по участкам</dt><dd>{{ flows.unevenness.toFixed(2) }}</dd></div>
+          <div><dt>Нужно рейсов в час по вместимости</dt><dd>{{ flows.neededTripsPerHour.toFixed(1) }}, есть {{ (60 / route.peakIntervalMin).toFixed(1) }}</dd></div>
+        </dl>
+        <label class="check"><input v-model="editor.transitLoadShown" type="checkbox" /> Эпюра наполнения на карте</label>
+        <div class="estimate">
+          <label for="flow-total">Всего входящих, пасс/ч</label>
+          <input id="flow-total" v-model.number="estimateTotal" class="input num" type="number" min="1" />
+          <button class="btn small" @click="fillEstimate">Оценить</button>
+          <button v-if="flows.hasData" class="btn ghost small" @click="clearFlows">Очистить</button>
+        </div>
+        <p class="muted info">Оценка делит вход поровну между пунктами, а выход равновероятно по следующим. Это допущение до появления данных обследования.</p>
+      </template>
     </template>
 
     <div class="grid-2">
@@ -267,6 +426,13 @@ function deleteSelected(): void {
       </div>
     </details>
     <button class="btn block small danger" @click="deleteSelected"><Trash2 :size="12" aria-hidden="true" /> Удалить маршрут</button>
+    <TimetableDialog
+      v-if="timetableOpen && route"
+      :title="line.from && line.to ? `${line.ref} ${line.from} → ${line.to}` : line.name"
+      :profile="route.profile"
+      :departures="route.departures"
+      @close="timetableOpen = false"
+    />
   </section>
 </template>
 
@@ -321,6 +487,51 @@ function deleteSelected(): void {
 }
 .profile input.tagged {
   border-color: var(--accent);
+}
+.profile tr.max td {
+  background: var(--row-selected);
+}
+.profile tr.short td {
+  color: var(--err-text);
+}
+.bad {
+  color: var(--err-text);
+}
+.periods {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+.period-head,
+.period {
+  display: grid;
+  grid-template-columns: 1fr 56px 22px;
+  align-items: center;
+  gap: 4px;
+}
+.period .times {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.period .times input {
+  min-width: 0;
+  padding: 1px 2px;
+}
+.num {
+  width: 56px;
+  padding: 1px 3px;
+}
+.estimate {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+.estimate label {
+  flex: 1;
+  color: var(--muted);
 }
 .create {
   display: flex;

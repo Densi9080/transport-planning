@@ -24,7 +24,8 @@ import { insertNodeOnWay, mergeNodes, moveNode } from '@/core/ops'
 import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
-import { stopPointOfArea } from '@/core/transitCalc'
+import { computeFlows } from '@/core/ridership'
+import { computeRoute, oppositeRoute, profileSpans, routeParams, stopPointOfArea } from '@/core/transitCalc'
 import { wayHeights } from '@/core/elevation'
 import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE } from '@/core/netObjects'
 import type { LatLon, ONode, XY } from '@/core/types'
@@ -494,6 +495,44 @@ function renderTransit(): void {
   setData('transitLabels', { type: 'FeatureCollection', features: labelFeatures })
   map.setLayoutProperty('transit-all', 'visibility', showAll ? 'visible' : 'none')
   map.setLayoutProperty('transit-stops', 'visibility', showAll || selectedId !== null ? 'visible' : 'none')
+  renderTransitLoad()
+}
+
+const LOAD_MAX_WIDTH_PX = 26
+
+/** Эпюра наполнения выбранного маршрута по данным входа и выхода. */
+function renderTransitLoad(): void {
+  const doc = editor.doc
+  const projector = editor.projector
+  if (!ready || !map || !doc || !projector) return
+  const line = editor.selectedLine
+  const features: Feature[] = []
+  const labels: Feature[] = []
+  if (line && editor.transitLoadShown) {
+    const route = computeRoute(doc, projector, line, oppositeRoute(line, editor.lines))
+    const flows = computeFlows(line.tags, route.profile, route.peakCapacityPerHour, routeParams(line).vehicleCapacity)
+    if (flows.hasData && flows.maxLoad > 0) {
+      const spans = profileSpans(doc, projector, line, route.profile.map((p) => p.distanceM))
+      flows.spans.forEach((span, index) => {
+        const coords = spans[index] ?? []
+        if (coords.length < 2 || span.load <= 0) return
+        const width = 2 + (LOAD_MAX_WIDTH_PX - 2) * (span.load / flows.maxLoad)
+        features.push({
+          type: 'Feature',
+          properties: { width, fill: span.fill },
+          geometry: { type: 'LineString', coordinates: coords.map((p) => [p.lon, p.lat]) },
+        })
+        const middle = coords[Math.floor(coords.length / 2)]!
+        labels.push({
+          type: 'Feature',
+          properties: { image: ensureLabelImage(map!, `${Math.round(span.load)} · ${Math.round(span.fill * 100)}%`, editor.theme) },
+          geometry: { type: 'Point', coordinates: [middle.lon, middle.lat] },
+        })
+      })
+    }
+  }
+  setData('transitLoad', { type: 'FeatureCollection', features })
+  setData('transitLoadLabels', { type: 'FeatureCollection', features: labels })
 }
 
 function segmentKey(a: number, b: number): string {
@@ -525,6 +564,18 @@ function lineOf(points: XY[], properties: Record<string, unknown>): Feature {
 
 function pointOf(position: LatLon, properties: Record<string, unknown>): Feature {
   return { type: 'Feature', properties, geometry: { type: 'Point', coordinates: [position.lon, position.lat] } }
+}
+
+const reportedFailures = new Set<string>()
+
+function guarded(part: string, draw: () => void): void {
+  try {
+    draw()
+  } catch (error) {
+    if (reportedFailures.has(part)) return
+    reportedFailures.add(part)
+    console.error(`Не удалось нарисовать: ${part}`, error)
+  }
 }
 
 function renderOverlay(): void {
@@ -560,8 +611,9 @@ function renderOverlay(): void {
   for (const { node, type } of customNodes.value) {
     if (!editor.objectHidden[type]) features.push(pointOf(node, { role: 'net-object', letter: CUSTOM_TYPES[type].letter }))
   }
-  renderSelectShapes(features)
-  if (map.getPitch() > PITCH_3D) renderSelected3d(features, doc, projector)
+  // Сбой во вспомогательной графике не должен гасить подсветку выбранного: она уже собрана выше
+  guarded('контур выделения', () => renderSelectShapes(features))
+  if (map.getPitch() > PITCH_3D) guarded('объёмная подсветка', () => renderSelected3d(features, doc, projector))
   const turnView = editor.turnPreview
   if (turnView) {
     for (const path of turnView.paths) features.push(lineOf(path, { role: 'turn-selected' }))
@@ -695,7 +747,7 @@ function renderSelectShapes(features: Feature[]): void {
     })))
     features.push(pointOf(editor.projector!.toLatLon(center), { role: 'draw-point' }))
   }
-  const polygon = editor.selectPolygon
+  const polygon = editor.selectPolygon ?? []
   if (polygon.length > 0) {
     const outline = polygonCursor ? [...polygon, polygonCursor] : polygon
     if (outline.length >= 3) features.push(selectAreaFeature(outline))
@@ -765,7 +817,7 @@ function onMouseMove(event: MapMouseEvent): void {
     scheduleOverlay()
     return
   }
-  if (editor.mode === 'select' && editor.selectPolygon.length > 0) {
+  if (editor.mode === 'select' && (editor.selectPolygon?.length ?? 0) > 0) {
     polygonCursor = editor.projector!.toXY({ lat: event.lngLat.lat, lon: event.lngLat.lng })
     scheduleOverlay()
     return
@@ -1698,7 +1750,7 @@ onMounted(() => {
   })
   instance.on('click', onClick)
   instance.on('contextmenu', (event) => {
-    if (editor.mode === 'select' && editor.selectPolygon.length > 0) {
+    if (editor.mode === 'select' && (editor.selectPolygon?.length ?? 0) > 0) {
       event.preventDefault()
       finishPolygon()
       return
@@ -1748,6 +1800,7 @@ watch(() => editor.hidden, () => {
   scheduleRender()
 })
 watch(() => [editor.selectedLineId, editor.layers.transit], renderTransit)
+watch(() => editor.transitLoadShown, renderTransitLoad)
 watch(() => editor.selection, scheduleOverlay)
 watch(() => editor.proposalTargets, scheduleOverlay)
 watch(() => [editor.issues, editor.focusedIssue], renderIssues)

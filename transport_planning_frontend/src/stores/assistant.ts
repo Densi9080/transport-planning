@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+import { acceptHMRUpdate, defineStore } from 'pinia'
 import { ref, shallowRef, watch } from 'vue'
 
 import {
@@ -357,3 +357,6 @@ export const useAssistant = defineStore('assistant', () => {
     reset,
   }
 })
+
+// Без этого при правке хранилища открытая вкладка держит старый экземпляр без новых полей
+if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useAssistant, import.meta.hot))

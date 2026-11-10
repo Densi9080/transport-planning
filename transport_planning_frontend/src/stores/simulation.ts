@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+import { acceptHMRUpdate, defineStore } from 'pinia'
 import { markRaw, reactive, ref, shallowRef, watch } from 'vue'
 
 import { type EdgeLoad, type MacroResult, type Period, runMacro } from '@/sim/macro'
@@ -279,3 +279,6 @@ export const useSimulation = defineStore('simulation', () => {
     edgesOfWay,
   }
 })
+
+// Без этого при правке хранилища открытая вкладка держит старый экземпляр без новых полей
+if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useSimulation, import.meta.hot))

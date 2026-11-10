@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+import { acceptHMRUpdate, defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
 
 import { runTraffic, type TrafficResult } from '@/api'
@@ -49,3 +49,6 @@ export const useTraffic = defineStore('traffic', () => {
 
   return { trips, running, visible, result, run, clear }
 })
+
+// Без этого при правке хранилища открытая вкладка держит старый экземпляр без новых полей
+if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useTraffic, import.meta.hot))

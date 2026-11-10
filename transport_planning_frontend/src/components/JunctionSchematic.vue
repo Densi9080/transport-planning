@@ -199,7 +199,7 @@ function laneClass(shape: LaneShape): Record<string, boolean> {
           :class="laneClass(shape)"
           tabindex="0"
           role="button"
-          :aria-label="`${armName(shape.arm)}, ${shape.incoming ? 'въезд' : 'выезд'}, полоса ${shape.index + 1}`"
+          :aria-label="`${armName(shape.arm)}, ${shape.incoming ? 'въезд' : 'выезд'}, полоса ${(shape.incoming ? shape.arm.lanesIn : shape.arm.lanesOut) - shape.index}`"
           @click="clickLane(shape)"
           @keydown.enter="clickLane(shape)"
         />

@@ -1,8 +1,9 @@
 import type { OsmDoc } from './doc'
 import { dist, nearestOnSegment, type Projector } from './geo'
 import { matchesNode } from './netObjects'
+import { departures, type IntervalPeriod, parseIntervalPeriods, peakInterval, serviceWindow, type ServiceWindow } from './timetable'
 import { lineSegments, type TransitLine, type TransitMode } from './transit'
-import type { ONode, Tags, XY } from './types'
+import type { LatLon, ONode, Tags, XY } from './types'
 
 /**
  * Показатели маршрута в иерархии Visum: линия объединяет маршруты по направлениям,
@@ -13,7 +14,6 @@ const DEFAULT_SPEED_KMH: Record<TransitMode, number> = { bus: 22, trolleybus: 20
 const DEFAULT_CAPACITY: Record<TransitMode, number> = { bus: 80, trolleybus: 90, tram: 150, minibus: 20, share_taxi: 20 }
 export const DEFAULT_DWELL_S = 20
 export const DEFAULT_LAYOVER_MIN = 5
-export const DEFAULT_HOURS = 16
 const STOP_AREA_REACH_M = 60
 
 export interface ProfilePoint {
@@ -32,6 +32,8 @@ export interface RouteParams {
   vehicleCapacity: number
   layoverMin: number
   hoursPerDay: number
+  window: ServiceWindow
+  periods: IntervalPeriod[]
 }
 
 export interface RouteResult {
@@ -47,6 +49,11 @@ export interface RouteResult {
   tripsPerDay: number
   vehicleKmPerDay: number
   hasOpposite: boolean
+  /** Отправления с начального пункта за день, мин от полуночи. */
+  departures: number[]
+  peakIntervalMin: number
+  /** Провозная способность при наименьшем интервале, чел/ч. */
+  peakCapacityPerHour: number
 }
 
 function numberTag(tags: Tags, key: string, fallback: number): number {
@@ -55,11 +62,14 @@ function numberTag(tags: Tags, key: string, fallback: number): number {
 }
 
 export function routeParams(line: TransitLine): RouteParams {
+  const window = serviceWindow(line.tags)
   return {
     speedKmh: numberTag(line.tags, 'tp:speed', DEFAULT_SPEED_KMH[line.mode] ?? 20),
     vehicleCapacity: numberTag(line.tags, 'tp:vehcap', DEFAULT_CAPACITY[line.mode] ?? 80),
     layoverMin: numberTag(line.tags, 'tp:layover', DEFAULT_LAYOVER_MIN),
-    hoursPerDay: numberTag(line.tags, 'tp:hours', DEFAULT_HOURS),
+    hoursPerDay: (window.lastMin - window.firstMin) / 60,
+    window,
+    periods: parseIntervalPeriods(line.tags),
   }
 }
 
@@ -89,6 +99,41 @@ function routePolyline(doc: OsmDoc, projector: Projector, line: TransitLine): XY
     }
   }
   return points
+}
+
+/** Участки линии маршрута между соседними пунктами: по ним рисуется эпюра наполнения. */
+export function profileSpans(doc: OsmDoc, projector: Projector, line: TransitLine, distances: number[]): LatLon[][] {
+  const polyline = routePolyline(doc, projector, line)
+  const walked: number[] = [0]
+  for (let i = 1; i < polyline.length; i++) walked.push(walked[i - 1]! + dist(polyline[i - 1]!, polyline[i]!))
+
+  const pointAt = (position: number): XY => {
+    for (let i = 1; i < polyline.length; i++) {
+      if (walked[i]! >= position) {
+        const a = polyline[i - 1]!
+        const b = polyline[i]!
+        const step = walked[i]! - walked[i - 1]!
+        const t = step > 0 ? (position - walked[i - 1]!) / step : 0
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+      }
+    }
+    return polyline.at(-1)!
+  }
+
+  const spans: LatLon[][] = []
+  for (let k = 0; k + 1 < distances.length; k++) {
+    const from = distances[k]!
+    const to = distances[k + 1]!
+    if (polyline.length < 2 || to <= from) {
+      spans.push([])
+      continue
+    }
+    const points = [pointAt(from)]
+    for (let i = 0; i < polyline.length; i++) if (walked[i]! > from && walked[i]! < to) points.push(polyline[i]!)
+    points.push(pointAt(to))
+    spans.push(points.map((p) => projector.toLatLon(p)))
+  }
+  return spans
 }
 
 /** Расстояние вдоль маршрута. Пункты идут по порядку, поэтому поиск продолжается только вперёд. */
@@ -138,6 +183,8 @@ export function computeRoute(doc: OsmDoc, projector: Projector, line: TransitLin
   const tripsPerHour = 60 / line.interval
   const otherS = opposite ? computeRoute(doc, projector, opposite, null).totalS : totalS
   const roundTripS = totalS + otherS + 2 * params.layoverMin * 60
+  const starts = departures(params.window, line.interval, params.periods)
+  const peak = peakInterval(line.interval, params.periods)
   return {
     profile,
     lengthM,
@@ -147,10 +194,14 @@ export function computeRoute(doc: OsmDoc, projector: Projector, line: TransitLin
     capacityPerHour: tripsPerHour * params.vehicleCapacity,
     vehicleKmPerHour: (tripsPerHour * lengthM) / 1000,
     roundTripS,
-    vehicles: Math.ceil(roundTripS / (line.interval * 60)),
-    tripsPerDay: tripsPerHour * params.hoursPerDay,
-    vehicleKmPerDay: ((tripsPerHour * lengthM) / 1000) * params.hoursPerDay,
+    // Машин нужно столько, чтобы держать самый частый интервал дня
+    vehicles: Math.ceil(roundTripS / (peak * 60)),
+    tripsPerDay: starts.length,
+    vehicleKmPerDay: (starts.length * lengthM) / 1000,
     hasOpposite: !!opposite,
+    departures: starts,
+    peakIntervalMin: peak,
+    peakCapacityPerHour: (60 / peak) * params.vehicleCapacity,
   }
 }
 
