@@ -66,6 +66,32 @@ describe('слияние двух дорог в одну', () => {
   })
 })
 
+describe('съезд, почти параллельный основной дороге', () => {
+  it('площадка узла тянется до расхождения полотен, «направо» не пересекает «прямо»', () => {
+    const raw: RawDocument = {
+      bounds: { minlat: 51.99, minlon: 103.99, maxlat: 52.01, maxlon: 104.01 },
+      nodes: [
+        { id: 1, lat: 52, lon: 104 - 100 * M },
+        { id: 2, lat: 52, lon: 104 },
+        { id: 3, lat: 52, lon: 104 + 150 * M },
+        // Съезд отходит вправо очень полого: через 40 м он всего на 2 м правее оси
+        { id: 5, lat: 52 - 2 * M, lon: 104 + 40 * M },
+        { id: 6, lat: 52 - 15 * M, lon: 104 + 90 * M },
+      ],
+      ways: [
+        { id: 10, nds: [1, 2], tags: { highway: 'primary', oneway: 'yes', lanes: '3', 'turn:lanes': 'through|through|right' } },
+        { id: 11, nds: [2, 3], tags: { highway: 'primary', oneway: 'yes', lanes: '2' } },
+        { id: 12, nds: [2, 5, 6], tags: { highway: 'primary_link', oneway: 'yes', lanes: '1' } },
+      ],
+      relations: [],
+    }
+    const doc = new OsmDoc(raw)
+    const connectors = nodeConnectors(doc, new Projector(raw.bounds), 2).connectors
+    expect(connectors.filter((c) => c.to.neighbor === 5).map((c) => c.fromLane)).toEqual([2])
+    expect(crossingConnectors(connectors)).toHaveLength(0)
+  })
+})
+
 describe('полосы на стыке: расширение и сужение без пересечений', () => {
   it('добавилась полоса направо: она справа, крайняя правая разделяется на прямо и направо', () => {
     expect(joint({ lanes: '2' }, { lanes: '3', 'turn:lanes': 'through|through|right' })).toEqual({ pairs: ['0>0', '1>1', '1>2'], crossings: 0 })

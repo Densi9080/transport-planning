@@ -155,6 +155,7 @@ function armGeometry(arms: Arm[]): Map<Arm, ArmGeometry> {
   sorted.forEach((arm, index) => {
     const width = totalWidth(arm.link.profile)
     let trim = 0
+    let split = 0
     if (!seamless && sorted.length > 1) {
       trim = 1.5
       for (const delta of [-1, 1]) {
@@ -166,8 +167,15 @@ function armGeometry(arms: Arm[]): Map<Arm, ArmGeometry> {
         const otherWidth = totalWidth(other.link.profile)
         const needed = (otherWidth / 2 + (width / 2) * cos) / Math.max(sin, 0.3) + CORNER_MARGIN_M
         trim = Math.max(trim, needed)
+        // Дороги расходятся «вилкой»: площадка узла тянется, пока ось одной не выйдет за край другой с её стороны
+        if (cos > SPLIT_COS) {
+          const armOnLeft = cross(other.dir, arm.dir) > 0
+          const required = sideHalf(other, armOnLeft ? 'left' : 'right') + SPLIT_GAP_M
+          split = Math.max(split, separationAlong(arm, other, required))
+        }
       }
       trim = Math.min(trim, arm.link.length * MAX_TRIM_SHARE)
+      if (split > 0) trim = Math.max(trim, Math.min(split, arm.link.length * MAX_SPLIT_TRIM_SHARE))
     }
     const along = arm.atStart ? trim : arm.link.length - trim
     const { point } = pointAlong(arm.link.points, along)
@@ -187,6 +195,40 @@ function armGeometry(arms: Arm[]): Map<Arm, ArmGeometry> {
     result.set(arm, { arm, trim, center: point, dir: arm.dir, halfLeft, halfRight, mitreTangent })
   })
   return result
+}
+
+/** Подходы ближе этого угла (около 25°) считаются расходящимися «вилкой». */
+const SPLIT_COS = 0.9
+const SPLIT_GAP_M = 0.3
+/** Расходящийся съезд может быть коротким: площадка узла занимает до трёх четвертей его длины. */
+const MAX_SPLIT_TRIM_SHARE = 0.75
+
+/** Половина ширины подхода с одной стороны оси, если смотреть от узла наружу. */
+function sideHalf(arm: Arm, side: 'left' | 'right'): number {
+  const offsets = laneOffsets(arm.link.profile)
+  const left = arm.atStart ? offsets.left : -offsets.right
+  const right = arm.atStart ? -offsets.right : offsets.left
+  return side === 'left' ? left : right
+}
+const SPLIT_STEP_M = 1
+const SPLIT_REACH_M = 120
+
+/**
+ * На каком расстоянии от узла ось подхода отходит от оси соседнего подхода на заданное расстояние.
+ * Нужна для съездов, которые в OSM начинаются в одной точке с основной дорогой и идут рядом с ней:
+ * без этого начало съезда оказывается внутри полотна основной дороги, и траектории манёвров пересекаются.
+ */
+function separationAlong(arm: Arm, other: Arm, required: number): number {
+  const own = arm.atStart ? arm.link.points : [...arm.link.points].reverse()
+  const theirs = other.atStart ? other.link.points : [...other.link.points].reverse()
+  const reach = Math.min(SPLIT_REACH_M, arm.link.length)
+  for (let along = SPLIT_STEP_M; along <= reach; along += SPLIT_STEP_M) {
+    const point = pointAlong(own, along).point
+    let nearest = Number.POSITIVE_INFINITY
+    for (let i = 1; i < theirs.length; i++) nearest = Math.min(nearest, nearestOnSegment(point, theirs[i - 1]!, theirs[i]!).distance)
+    if (nearest >= required) return along + CORNER_MARGIN_M
+  }
+  return reach
 }
 
 /** Две дороги одной ширины, идущие почти по прямой, стыкуются без отдельной площадки. */
