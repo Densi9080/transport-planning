@@ -402,6 +402,55 @@ function lanesForTurn(arm: Arm, kind: TurnKind, kinds: Set<TurnKind>, ignoreTags
   return kinds.has('left') ? [] : [0]
 }
 
+/** Стрелки полос по ходу движения на этом подходе: у въезда — к узлу, у выезда — от узла. */
+function armTurns(arm: Arm, entering: boolean): string[] | null {
+  const profile = arm.link.profile
+  // Въезд в узел идёт по дороге к узлу, выезд — от узла
+  const forward = entering ? !arm.atStart : arm.atStart
+  const turns = forward ? profile.turnsForward : profile.turnsBackward
+  const count = entering ? arm.lanesIn : arm.lanesOut
+  return turns && turns.length === count ? turns : null
+}
+
+/** Полоса только для поворота в эту сторону: «right», «slight_right;right» и т. п. без «through». */
+function pureTurn(value: string | undefined, side: 'left' | 'right'): boolean {
+  if (!value || value === 'none') return false
+  const parts = value.split(';')
+  return parts.every((part) => part.includes(side) || (side === 'left' && part === 'reverse'))
+}
+
+/**
+ * Соединение полос на стыке двух отрезков, где число полос может меняться.
+ * Полосы соединяются по порядку и не пересекаются.
+ * Расширение: новые полосы появляются с той стороны, куда ведут по разметке дальше (стрелка направо — справа,
+ * налево — слева), без разметки — справа. Крайняя полоса на этой стороне разделяется: продолжается прямо и даёт
+ * начало новым полосам. Сужение: исчезают крайние правые полосы, они вливаются в соседнюю слева.
+ * Индексы полос — слева направо по ходу движения, как в turn:lanes.
+ */
+export function continuationPairs(from: Arm, to: Arm): [number, number][] {
+  const n = from.lanesIn
+  const m = to.lanesOut
+  const pairs: [number, number][] = []
+  if (n === 0 || m === 0) return pairs
+  if (m >= n) {
+    const extra = m - n
+    const turns = armTurns(to, false)
+    let leftPure = 0
+    while (turns && leftPure < m && pureTurn(turns[leftPure], 'left')) leftPure++
+    let rightPure = 0
+    while (turns && rightPure < m && pureTurn(turns[m - 1 - rightPure], 'right')) rightPure++
+    // Новые полосы слева — только если слева есть полосы для поворота налево и их не больше, чем добавилось
+    const addLeft = Math.min(extra, rightPure >= extra ? 0 : leftPure)
+    const addRight = extra - addLeft
+    for (let i = 0; i < n; i++) pairs.push([i, i + addLeft])
+    for (let k = 0; k < addLeft; k++) pairs.push([0, k])
+    for (let k = 0; k < addRight; k++) pairs.push([n - 1, n + addLeft + k])
+  } else {
+    for (let i = 0; i < n; i++) pairs.push([i, Math.min(i, m - 1)])
+  }
+  return pairs
+}
+
 function outLaneFor(index: number, usedCount: number, outCount: number, kind: TurnKind): number {
   if (outCount <= 1) return 0
   if (kind === 'right') return outCount - 1 - Math.min(usedCount - 1 - index, outCount - 1)
@@ -583,10 +632,12 @@ export function junctionConnectors(
           // Заданные вручную соединения важнее разметки: так разрешают манёвр и с «неправильной» полосы
           pairs = rule.pairs.filter(([a, b]) => a >= 0 && a < from.lanesIn && b >= 0 && b < to.lanesOut)
         } else {
-          const lanes = continuation
-            ? Array.from({ length: from.lanesIn }, (_, i) => i)
-            : lanesForTurn(from, kind, kinds, ignoreTags)
-          pairs = lanes.map((lane, index) => [lane, outLaneFor(index, lanes.length, to.lanesOut, continuation ? 'through' : kind)])
+          if (continuation) {
+            pairs = continuationPairs(from, to)
+          } else {
+            const lanes = lanesForTurn(from, kind, kinds, ignoreTags)
+            pairs = lanes.map((lane, index) => [lane, outLaneFor(index, lanes.length, to.lanesOut, kind)])
+          }
         }
         pairs.forEach(([lane, toLane]) => {
           const start = lanePoint(fromGeometry, lane, true)
