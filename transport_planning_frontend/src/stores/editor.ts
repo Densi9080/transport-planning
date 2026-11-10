@@ -1288,13 +1288,24 @@ export const useEditor = defineStore('editor', () => {
     toast(done > 0 ? 'Дорога разрезана' : 'Конец дороги резать не нужно', done > 0 ? 'success' : 'info')
   }
 
-  function splitAtPosition(wayId: number, position: LatLon): void {
+  /** Разрез дороги в точке. Возвращает узел разреза, если дорога разрезана. */
+  function splitAtPosition(wayId: number, position: LatLon): number | null {
     let ok = false
-    mutate('Разрезание дороги', (d, p) => {
-      const nodeId = insertNodeOnWay(d, p, wayId, position)
-      ok = splitWay(d, wayId, nodeId) !== null
+    const nodeId = mutate('Разрезание дороги', (d, p) => {
+      const id = insertNodeOnWay(d, p, wayId, position)
+      ok = splitWay(d, wayId, id) !== null
+      return id
     })
     if (ok) toast('Дорога разрезана', 'success')
+    return ok && nodeId !== undefined ? nodeId : null
+  }
+
+  /** Тройной щелчок по дороге: разрез в этой точке, узел разреза сразу выбран, его можно тянуть. */
+  function splitAndSelect(wayId: number, position: LatLon): void {
+    const nodeId = splitAtPosition(wayId, position)
+    if (nodeId === null) return
+    selectOne({ kind: 'node', id: nodeId })
+    toast('Дорога разрезана. Узел разреза выбран: его можно перетащить')
   }
 
   function addFreeNode(position: LatLon): void {
@@ -1755,6 +1766,7 @@ export const useEditor = defineStore('editor', () => {
     joinSelected,
     splitAtNode,
     splitAtPosition,
+    splitAndSelect,
     addFreeNode,
     addNodeOnWay,
     toggleOnNode,
