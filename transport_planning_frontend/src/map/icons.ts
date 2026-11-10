@@ -104,6 +104,68 @@ function direction(ctx: CanvasRenderingContext2D): void {
 
 const SIGN_SIZE = 72
 
+export type StopIconMode = 'bus' | 'trolleybus' | 'tram'
+
+/**
+ * Значок остановки по мотивам знаков 5.16 и 5.17 ПДД: синий квадрат, белое поле, силуэт транспорта.
+ * У трамвая пантограф сверху, у троллейбуса две штанги: их видно и в мелком масштабе.
+ */
+function stopIcon(mode: StopIconMode): Painter {
+  return (ctx) => {
+    const s = SIGN_SIZE
+    ctx.fillStyle = '#ffffff'
+    ctx.beginPath()
+    ctx.roundRect(1, 1, s - 2, s - 2, 9)
+    ctx.fill()
+    ctx.fillStyle = mode === 'tram' ? '#b45309' : '#1d4ed8'
+    ctx.beginPath()
+    ctx.roundRect(4, 4, s - 8, s - 8, 7)
+    ctx.fill()
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(11, 11, s - 22, s - 22)
+    ctx.fillStyle = '#111827'
+    ctx.strokeStyle = '#111827'
+    const top = mode === 'bus' ? 24 : 30
+    // Кузов с окнами
+    ctx.beginPath()
+    ctx.roundRect(16, top, s - 32, 54 - top, 4)
+    ctx.fill()
+    ctx.fillStyle = '#ffffff'
+    const windows = 3
+    const gap = 3
+    const width = (s - 32 - 8 - gap * (windows - 1)) / windows
+    for (let i = 0; i < windows; i++) ctx.fillRect(20 + i * (width + gap), top + 4, width, 9)
+    ctx.fillStyle = '#111827'
+    if (mode === 'tram') {
+      // Колёсные тележки и пантограф
+      ctx.fillRect(20, 54, 10, 4)
+      ctx.fillRect(s - 30, 54, 10, 4)
+      ctx.lineWidth = 2.5
+      ctx.beginPath()
+      ctx.moveTo(s / 2 - 8, top)
+      ctx.lineTo(s / 2, top - 10)
+      ctx.lineTo(s / 2 + 8, top)
+      ctx.moveTo(s / 2 - 10, top - 12)
+      ctx.lineTo(s / 2 + 10, top - 12)
+      ctx.stroke()
+    } else {
+      ctx.beginPath()
+      ctx.arc(24, 55, 4, 0, Math.PI * 2)
+      ctx.arc(s - 24, 55, 4, 0, Math.PI * 2)
+      ctx.fill()
+      if (mode === 'trolleybus') {
+        ctx.lineWidth = 2.5
+        ctx.beginPath()
+        ctx.moveTo(26, top)
+        ctx.lineTo(42, top - 12)
+        ctx.moveTo(32, top)
+        ctx.lineTo(48, top - 12)
+        ctx.stroke()
+      }
+    }
+  }
+}
+
 function stopSign(ctx: CanvasRenderingContext2D): void {
   const c = SIGN_SIZE / 2
   const r = c - 3
@@ -225,6 +287,9 @@ export function registerIcons(map: MlMap): void {
   map.addImage('sign-bump', makeImage(bumpSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   map.addImage('sign-main', makeImage(mainRoadSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   map.addImage('sign-main-bent', makeImage(mainRoadBentSign, SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  for (const mode of ['bus', 'trolleybus', 'tram'] as const) {
+    map.addImage(`stop-${mode}`, makeImage(stopIcon(mode), SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
+  }
   for (const speed of SECTION_SPEEDS) {
     map.addImage(`sign-speed-${speed}`, makeImage(speedSign(speed), SIGN_SIZE, SIGN_SIZE), { pixelRatio: 2 })
   }

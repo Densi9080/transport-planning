@@ -10,6 +10,8 @@ import {
   MIN_GREEN_S,
   phaseWindows,
   type SignalPlan,
+  signalSegments,
+  signalTimes,
   withGreenMoved,
 } from '@/core/signals'
 import { approachName, formatSeconds, KIND_LABELS } from '@/sim/signalView'
@@ -55,6 +57,15 @@ const rows = computed<MovementRow[]>(() => {
 
 const unassigned = computed(() => rows.value.filter((row) => row.phases.length === 0))
 
+/** Пешеходы идут в фазах, где машинам горит красный: отмеченных пешеходными или без манёвров. */
+const pedestrians = computed(() => {
+  const current = plan.value
+  if (!current) return null
+  const phases = current.phases.flatMap((phase, index) => (phase.pedestrian || phase.movements.length === 0 ? [index] : []))
+  if (phases.length === 0) return null
+  return { phases, times: signalTimes(current, phases), segments: signalSegments(current, phases) }
+})
+
 /** Два потока, пересекающиеся на одном зелёном. Левый поворот уступает встречным, это допустимо. */
 const conflicts = computed(() => {
   const current = plan.value
@@ -78,7 +89,7 @@ const conflicts = computed(() => {
 
 function clonePlan(): SignalPlan {
   const current = plan.value!
-  return { ...current, phases: current.phases.map((phase) => ({ green: phase.green, movements: [...phase.movements] })) }
+  return { ...current, phases: current.phases.map((phase) => ({ ...phase, movements: [...phase.movements] })) }
 }
 
 function toggle(row: MovementRow, index: number): void {
@@ -283,6 +294,24 @@ function nudge(index: number, event: KeyboardEvent): void {
                 <td class="graph">
                   <SignalBar :segments="direction.segments" :cycle="cycle" :marker="signal.cycleTime.value" />
                 </td>
+              </tr>
+              <tr v-if="pedestrians" class="pedestrians">
+                <td class="left name"><span class="ellipsis">Пешеходы</span></td>
+                <td class="left kinds"><span class="ellipsis">через проезжую часть</span></td>
+                <td class="num">
+                  <input
+                    class="input time"
+                    type="number"
+                    min="1"
+                    aria-label="Зелёный пешеходам, секунд"
+                    :value="pedestrians.times.green"
+                    @change="editNumber($event, pedestrians!.times.green, (value) => signal.setGreenTime(pedestrians!, value))"
+                  />
+                </td>
+                <td class="num value">{{ formatSeconds(pedestrians.times.yellow) }}</td>
+                <td class="num value">{{ formatSeconds(pedestrians.times.red) }}</td>
+                <td class="num value">{{ Math.round((pedestrians.times.green / cycle) * 100) }}%</td>
+                <td class="graph"><SignalBar :segments="pedestrians.segments" :cycle="cycle" :marker="signal.cycleTime.value" /></td>
               </tr>
               <tr class="axis">
                 <td colspan="6" class="faint left axis-note">

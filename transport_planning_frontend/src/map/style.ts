@@ -385,6 +385,8 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'fill-extrusion-color': '#70747d',
       'fill-extrusion-base': ['get', 'base'],
       'fill-extrusion-height': ['get', 'top'],
+      'fill-extrusion-opacity': 0.96,
+      'fill-extrusion-vertical-gradient': true,
     } },
 
     { id: 'graph-links', type: 'line', source: 'graphLinks', layout: { visibility: 'none', 'line-cap': 'round' }, paint: {
@@ -560,41 +562,40 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#0b0c0e',
       'circle-stroke-width': 1.5,
     } },
-    { id: 'node-dots', type: 'circle', source: 'graphNodes', minzoom: 13, filter: ['>=', ['get', 'degree'], 3], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 2.5, 18, 5, 20, 7],
+    // Узлы перекрёстков и места разреза дороги (меньше, с 15-го масштаба)
+    { id: 'node-dots', type: 'circle', source: 'graphNodes', minzoom: 13, filter: ['any', ['>=', ['get', 'degree'], 3], ['to-boolean', ['get', 'split']]], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, ['case', ['to-boolean', ['get', 'split']], 0, 2.5], 15, ['case', ['to-boolean', ['get', 'split']], 1.8, 3.5], 18, ['case', ['to-boolean', ['get', 'split']], 3.5, 5], 20, ['case', ['to-boolean', ['get', 'split']], 5, 7]],
       'circle-color': '#e5e7eb',
       'circle-stroke-color': '#111827',
       'circle-stroke-width': 1,
     } },
-    // Остановка: пунктирный контур вокруг своих зон и пунктов
-    { id: 'net-stop-fill', type: 'fill', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stopShape'], paint: {
-      'fill-color': ['case', ['get', 'selected'], 'rgba(250,204,21,0.16)', 'rgba(147,197,253,0.07)'],
+    // Платформа-линия — полупрозрачная полоса по её форме, под значком
+    { id: 'net-stop-area-line', type: 'line', source: 'netStops', minzoom: 15, filter: ['==', ['get', 'kind'], 'areaLine'], layout: { 'line-cap': 'butt' }, paint: {
+      'line-color': ['case', ['==', ['get', 'stop'], null], 'rgba(248,113,113,0.5)', 'rgba(96,165,250,0.45)'],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 15, 2, 19, 7],
     } },
-    { id: 'net-stop', type: 'line', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stopShape'], paint: {
-      'line-color': ['case', ['get', 'selected'], '#facc15', '#93c5fd'],
-      'line-width': ['case', ['get', 'selected'], 2.5, 1.5],
-      'line-dasharray': [3, 2],
+    // Остановочный пункт: точка на дороге, где транспорт берёт пассажиров. Без зоны — красная, трамвайный — коричневый
+    { id: 'net-stop-point', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'point'], paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 2, 18, 4],
+      'circle-color': ['case', ['get', 'orphan'], '#ef4444', ['==', ['get', 'mode'], 'tram'], '#b45309', '#1d4ed8'],
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1.2,
     } },
+    // Остановка (павильон, платформа): значок 5.16 / 5.17, трамвайная своим значком
+    { id: 'net-stop-icon', type: 'symbol', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'areaIcon'], layout: {
+      'icon-image': ['get', 'image'],
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 14, ['case', ['get', 'selected'], 0.55, 0.38], 18, ['case', ['get', 'selected'], 0.95, 0.7], 21, ['case', ['get', 'selected'], 1.4, 1.1]],
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    }, paint: {
+      'icon-opacity': ['case', ['get', 'orphan'], 0.6, 1],
+    } },
+    // Название остановки над её значками
     { id: 'net-stop-label', type: 'symbol', source: 'netStops', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'stopLabel'], layout: {
       'icon-image': ['get', 'image'],
       'icon-anchor': 'bottom',
+      'icon-offset': [0, -14],
       'icon-allow-overlap': false,
-    } },
-    // Зона: квадрат у дороги, платформа-линия — толстая линия
-    { id: 'net-stop-area', type: 'fill', source: 'netStops', minzoom: 15, filter: ['==', ['get', 'kind'], 'area'], paint: {
-      'fill-color': ['case', ['==', ['get', 'stop'], null], 'rgba(248,113,113,0.35)', 'rgba(96,165,250,0.45)'],
-      'fill-outline-color': '#60a5fa',
-    } },
-    { id: 'net-stop-area-line', type: 'line', source: 'netStops', minzoom: 15, filter: ['==', ['get', 'kind'], 'areaLine'], layout: { 'line-cap': 'butt' }, paint: {
-      'line-color': ['case', ['==', ['get', 'stop'], null], 'rgba(248,113,113,0.6)', 'rgba(96,165,250,0.6)'],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 15, 2, 19, 8],
-    } },
-    // Пункт: точка на дороге, без зоны — красная
-    { id: 'net-stop-point', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'point'], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 2.5, 18, 5],
-      'circle-color': ['case', ['get', 'orphan'], '#ef4444', '#1d4ed8'],
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 1.2,
     } },
     { id: 'traffic-lane', type: 'line', source: 'trafficLoad', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': ['interpolate', ['linear'], ['get', 'ratio'], 0, '#22c55e', 0.5, '#facc15', 0.8, '#f97316', 1, '#dc2626'],
@@ -905,7 +906,8 @@ export function themePaint(theme: ThemeName): [string, string, unknown][] {
     ['bridge-casing', 'line-color', c.bridgeEdge],
     ['bridge-outline', 'line-color', c.bridgeOutline],
     ['bridge-shadow', 'fill-opacity', c.bridgeShadow],
-    ['road-3d', 'fill-extrusion-color', c.road3d],
+    // Опоры темнее настила, насыпь подходов чуть светлее: мост читается объёмом, как здание
+    ['road-3d', 'fill-extrusion-color', ['match', ['get', 'kind'], 'pier', c.building3d, c.road3d]],
     ['markings-edge', 'line-color', c.marking],
     ['markings-divider', 'line-color', c.marking],
     ['markings-lane', 'line-color', c.marking],

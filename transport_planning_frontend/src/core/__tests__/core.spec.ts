@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { OsmDoc } from '../doc'
 import { Projector } from '../geo'
 import { laneOffsets, parseProfile, toggleTurn, withLanes, withTurns } from '../lanes'
+import { isSignalNode } from '../nodeKinds'
 import {
   deleteNode,
   deleteWay,
@@ -460,7 +461,9 @@ describe('настоящий файл example.osm', () => {
     expect(network.links.length).toBeGreaterThan(300)
     expect(scene.surface.features.length).toBeGreaterThan(300)
     expect(scene.turnPaths.features.length).toBeGreaterThan(100)
-    expect(scene.signals.features.length).toBe(2)
+    // 2 светофора highway=traffic_signals и 3 регулируемых перехода crossing=traffic_signals
+    expect(scene.signals.features.length).toBe([...doc.nodes.values()].filter((node) => isSignalNode(node.tags)).length)
+    expect(scene.signals.features.length).toBe(5)
     for (const layer of Object.values(scene)) {
       const text = JSON.stringify(layer)
       expect(text).not.toContain('null,null')

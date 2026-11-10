@@ -9,6 +9,7 @@ import { moveNode } from '@/core/ops'
 import { type Arm, junctionMovements, type Movement } from '@/core/topology'
 import { signApplies } from '@/core/traffic'
 import type { ONode, Tags } from '@/core/types'
+import { isCrossingNode, isSignalNode } from '@/core/nodeKinds'
 import { useEditor } from '@/stores/editor'
 
 import JunctionPriorityCard from './JunctionPriorityCard.vue'
@@ -23,8 +24,13 @@ const wayIds = computed(() => {
   void editor.rev
   return editor.doc?.waysOfNode(props.node.id) ?? []
 })
-const isSignal = computed(() => tags.value.highway === 'traffic_signals')
-const isCrossing = computed(() => tags.value.highway === 'crossing')
+/** Подходов в графе: у светофора посреди перегона их два, хотя дорога через узел одна. */
+const armCount = computed(() => {
+  void editor.rev
+  return editor.network?.arms.get(props.node.id)?.length ?? 0
+})
+const isSignal = computed(() => isSignalNode(tags.value))
+const isCrossing = computed(() => isCrossingNode(tags.value))
 
 const COMPASS = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ']
 const TURN_LABELS: Record<string, string> = {
@@ -59,7 +65,7 @@ const groups = computed(() => {
 /** Соединения полос узла — те же, что рисуются на карте и в редакторе узла. */
 const connectors = computed(() => {
   void editor.rev
-  return editor.doc && editor.projector && wayIds.value.length > 1 ? nodeConnectors(editor.doc, editor.projector, props.node.id).connectors : []
+  return editor.doc && editor.projector && armCount.value > 1 ? nodeConnectors(editor.doc, editor.projector, props.node.id).connectors : []
 })
 
 function lanesOf(movement: Movement): number[] {
@@ -158,7 +164,7 @@ function setCoordinate(key: 'lat' | 'lon', event: Event): void {
   </div>
 
   <div class="section">
-    <button class="btn primary block" :disabled="wayIds.length < 2" @click="editor.openJunction(node.id)">
+    <button class="btn primary block" :disabled="armCount < 2" @click="editor.openJunction(node.id)">
       <Route :size="13" aria-hidden="true" /> Редактор узла: полосы и фазы <kbd>E</kbd>
     </button>
     <div class="grid-2">

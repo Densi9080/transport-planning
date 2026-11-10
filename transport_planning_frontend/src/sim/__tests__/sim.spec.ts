@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { OsmDoc } from '@/core/doc'
-import { applyElevationRamp, maxSlopePercent, wayHeights } from '@/core/elevation'
+import { applyElevationRamp, LAYER_HEIGHT_M, maxSlopePercent, wayHeights } from '@/core/elevation'
 import { Projector } from '@/core/geo'
 import { parseSample } from '@/core/__tests__/sample'
 import type { RawDocument } from '@/core/types'
@@ -157,7 +157,7 @@ describe('высоты', () => {
     expect(maxSlopePercent(doc, doc.way(30), projector)).toBeLessThan(10)
   })
 
-  it('мост без ele поднимается и опускается к земле', () => {
+  it('мост без ele стоит на своей высоте по всему пролёту, а к земле опускаются подходы', () => {
     const raw = crossroads()
     raw.nodes.push(
       { id: 6, lat: 52, lon: 104 + 2 * STEP },
@@ -165,6 +165,22 @@ describe('высоты', () => {
       { id: 8, lat: 52, lon: 104 + 4 * STEP },
     )
     raw.ways.push({ id: 30, nds: [3, 6, 7], tags: { highway: 'primary', bridge: 'yes', layer: '1' } })
+    raw.ways.push({ id: 31, nds: [7, 8], tags: { highway: 'primary' } })
+    const { doc } = setup(raw)
+    const bridge = wayHeights(doc, doc.way(30))
+    expect(bridge.get(3)).toBe(LAYER_HEIGHT_M)
+    expect(bridge.get(6)).toBe(LAYER_HEIGHT_M)
+    expect(bridge.get(7)).toBe(LAYER_HEIGHT_M)
+    // Подход начинается на высоте моста и плавно сходит на землю
+    const approach = wayHeights(doc, doc.way(31))
+    expect(approach.get(7)).toBeCloseTo(LAYER_HEIGHT_M, 5)
+    expect(approach.get(8)).toBeLessThan(1)
+  })
+
+  it('эстакада с layer=1 без тега bridge сама опускается к земле', () => {
+    const raw = crossroads()
+    raw.nodes.push({ id: 6, lat: 52, lon: 104 + 2 * STEP }, { id: 7, lat: 52, lon: 104 + 3 * STEP }, { id: 8, lat: 52, lon: 104 + 4 * STEP })
+    raw.ways.push({ id: 30, nds: [3, 6, 7], tags: { highway: 'primary', layer: '1' } })
     raw.ways.push({ id: 31, nds: [7, 8], tags: { highway: 'primary' } })
     const { doc } = setup(raw)
     const heights = wayHeights(doc, doc.way(30))

@@ -239,7 +239,10 @@ function setMix(key: 'aggressive' | 'calm', event: Event): void {
         <button :class="{ active: sim.macroView === 'bars' }" :aria-pressed="sim.macroView === 'bars'" @click="sim.macroView = 'bars'">Столбики потока</button>
         <button :class="{ active: sim.macroView === 'fill' }" :aria-pressed="sim.macroView === 'fill'" @click="sim.macroView = 'fill'">Заливка дорог</button>
       </div>
-      <label class="check"><input v-model="sim.showDesire" type="checkbox" /> Районы и линии желания</label>
+      <!-- В Visum это Desire lines, «линии желаний»: корреспонденции между районами по прямой, без привязки к сети -->
+      <label class="check" title="Корреспонденции между транспортными районами, нарисованные по прямой («по воздуху»), без привязки к улицам. В Visum — линии желаний (Desire lines)">
+        <input v-model="sim.showDesire" type="checkbox" /> Районы и корреспонденции по прямой
+      </label>
     </div>
 
     <div class="section">

@@ -17,7 +17,7 @@ import type { Feature, FeatureCollection } from 'geojson'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { OsmDoc } from '@/core/doc'
-import { bearing, dist, nearestOnSegment, offsetPolyline, pointInPolygon, polylineLength, type Projector, segmentsCross, smoothCurve, sub, unit } from '@/core/geo'
+import { bearing, dist, nearestOnSegment, offsetPolyline, pointAlong, pointInPolygon, polylineLength, type Projector, segmentsCross, smoothCurve, sub, unit } from '@/core/geo'
 import { hiddenJunctions } from '@/core/filter'
 import type { LanePort } from '@/core/lanePick'
 import { isDrivable, laneOffsets, parseProfile, totalWidth } from '@/core/lanes'
@@ -26,7 +26,6 @@ import { buildScene, buildStaticScene, curveMiddle, shapedCurve, type StaticScen
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
 import { computeFlows } from '@/core/ridership'
-import { paddedHull } from '@/core/stops'
 import { computeRoute, oppositeRoute, profileSpans, routeParams } from '@/core/transitCalc'
 import { wayHeights } from '@/core/elevation'
 import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE } from '@/core/netObjects'
@@ -89,6 +88,8 @@ const HALF_LANE_M = 1.75
 const BAR_VEHICLES_PER_PX = 70
 const BAR_LABEL_MIN = 300
 const BAR_LABEL_COUNT = 40
+/** Подпись объёма отступает от правой кромки направления, чтобы стоять рядом со столбиком, а не на нём. */
+const BAR_LABEL_OFFSET_M = 6
 const OD_LINES = 150
 
 const editor = useEditor()
@@ -359,44 +360,32 @@ function lineLngLat(coordinates: number[][], properties: Record<string, unknown>
   return { type: 'Feature', properties, geometry: { type: 'LineString', coordinates } }
 }
 
-const AREA_HALF_M = 3.5
-const STOP_PADDING_M = 9
-
 /**
- * Остановки в иерархии Visum: пункт — точка на дороге, зона — квадрат у дороги с линиями к своим пунктам,
- * остановка — пунктирный контур вокруг всех своих зон и пунктов с названием.
+ * Остановки в иерархии Visum. Остановочный пункт — точка на дороге, где транспорт берёт пассажиров.
+ * Зона остановки (павильон, платформа) — значок остановки у дороги, трамвайная своим значком,
+ * тонкие линии ведут от неё к её пунктам. Остановка целиком — подпись с названием.
+ * Контур вокруг остановки временно не рисуется: он строился по разбросу точек и путал.
  */
 function stopObjectFeatures(): Feature[] {
   const doc = editor.doc!
-  const projector = editor.projector!
   const hierarchy = editor.stopHierarchy
   const features: Feature[] = []
   if (!hierarchy) return features
   const selectedStop = editor.selectedStopId
-  const polygon = (ring: XY[], properties: Record<string, unknown>): Feature => {
-    const coordinates = [...ring, ring[0]!].map((p) => projector.toLngLat(p))
-    return { type: 'Feature', properties, geometry: { type: 'Polygon', coordinates: [coordinates] } }
-  }
 
   for (const stop of hierarchy.stops.values()) {
-    const members = [...stop.areas.map((key) => hierarchy.areas.get(key)!.position), ...stop.points.map((id) => doc.node(id))]
-    if (members.length === 0 || !stop.position) continue
-    const hull = paddedHull(members.map((p) => projector.toXY(p)), STOP_PADDING_M)
-    features.push(polygon(hull, { kind: 'stopShape', stop: stop.id, selected: stop.id === selectedStop }))
-    const top = hull.reduce((best, p) => (p.y > best.y ? p : best), hull[0]!)
-    features.push(pointOf(projector.toLatLon(top), { kind: 'stopLabel', stop: stop.id, image: ensureLabelImage(map!, stop.name, editor.theme) }))
+    if (!stop.position) continue
+    features.push(pointOf(stop.position, { kind: 'stopLabel', stop: stop.id, image: ensureLabelImage(map!, stop.name, editor.theme) }))
   }
 
   for (const area of hierarchy.areas.values()) {
-    const center = projector.toXY(area.position)
-    if (area.kind === 'node') {
-      const h = AREA_HALF_M
-      features.push(polygon([{ x: center.x - h, y: center.y - h }, { x: center.x + h, y: center.y - h }, { x: center.x + h, y: center.y + h }, { x: center.x - h, y: center.y + h }], { kind: 'area', stop: area.stop }))
-    } else {
+    const selected = area.stop !== null && area.stop === selectedStop
+    if (area.kind === 'way') {
       const way = doc.ways.get(area.id)
       const coordinates = (way?.nds ?? []).map((id) => doc.nodes.get(id)).filter((n): n is NonNullable<typeof n> => !!n).map((n) => [n.lon, n.lat])
       if (coordinates.length >= 2) features.push(lineLngLat(coordinates, { kind: 'areaLine', stop: area.stop }))
     }
+    features.push(pointOf(area.position, { kind: 'areaIcon', stop: area.stop, image: `stop-${area.mode}`, mode: area.mode, selected, orphan: area.stop === null }))
     for (const id of area.points) {
       const node = doc.node(id)
       features.push(lineLngLat([[area.position.lon, area.position.lat], [node.lon, node.lat]], { kind: 'link' }))
@@ -404,7 +393,7 @@ function stopObjectFeatures(): Feature[] {
   }
 
   for (const point of hierarchy.points.values()) {
-    features.push(pointOf(point.node, { kind: 'point', orphan: !point.area }))
+    features.push(pointOf(point.node, { kind: 'point', orphan: !point.area, mode: point.mode }))
   }
   return features
 }
@@ -560,11 +549,13 @@ function renderTransitLoad(): void {
           properties: { width, fill: span.fill },
           geometry: { type: 'LineString', coordinates: coords.map((p) => [p.lon, p.lat]) },
         })
-        const middle = coords[Math.floor(coords.length / 2)]!
+        // Середина перегона по длине, а не по числу точек: иначе подпись съезжала к остановке с густой геометрией
+        const path = coords.map((p) => projector.toXY(p))
+        const middle = projector.toLngLat(pointAlong(path, polylineLength(path) / 2).point)
         labels.push({
           type: 'Feature',
           properties: { image: ensureLabelImage(map!, `${Math.round(span.load)} · ${Math.round(span.fill * 100)}%`, editor.theme) },
-          geometry: { type: 'Point', coordinates: [middle.lon, middle.lat] },
+          geometry: { type: 'Point', coordinates: middle },
         })
       })
     }
@@ -1323,7 +1314,7 @@ function onClick(event: MapMouseEvent): void {
         }
         if (stopId === null) {
           const { x, y } = event.point
-          const shape = map!.queryRenderedFeatures([[x - 3, y - 3], [x + 3, y + 3]], { layers: ['net-stop-fill', 'net-stop-label'] })[0]
+          const shape = map!.queryRenderedFeatures([[x - 3, y - 3], [x + 3, y + 3]], { layers: ['net-stop-icon', 'net-stop-label'] })[0]
           stopId = (shape?.properties?.stop as number | undefined) ?? null
         }
         if (stopId !== null) {
@@ -1558,7 +1549,7 @@ function onDoubleClick(event: MapMouseEvent): void {
   // Двойной щелчок по узлу открывает редактор узла
   if (editor.tool === 'select') {
     const hit = pick(event.lngLat)
-    if (hit?.kind === 'node' && editor.doc!.waysOfNode(hit.id).length >= 2) {
+    if (hit?.kind === 'node' && (editor.doc!.waysOfNode(hit.id).length >= 2 || (editor.network?.arms.get(hit.id)?.length ?? 0) >= 2)) {
       event.preventDefault()
       editor.openJunction(hit.id)
     }
@@ -1601,8 +1592,8 @@ function applyView(): void {
   m.setLayerZoomRange('markings-lane', 16, markTop)
   m.setLayerZoomRange('markings-lane-solid', 15.5, markTop)
   visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
-  visible(['net-stop-area', 'net-stop-area-line', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
-  visible(['net-stop', 'net-stop-fill', 'net-stop-label'], !isSim && !editor.objectHidden.stops)
+  visible(['net-stop-icon', 'net-stop-area-line', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
+  visible(['net-stop-label'], !isSim && !editor.objectHidden.stops)
   visible(['crossings-axis', 'crossings-band', 'crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
   visible(['traffic-signs'], editor.layers.trafficSigns)
@@ -1616,9 +1607,13 @@ function applyView(): void {
   visible(['buildings'], editor.layers.buildings && !threeD)
   visible(['buildings-3d'], editor.layers.buildings && threeD)
   visible(['road-3d'], threeD)
+  // В 3D мост стоит объёмом над землёй: плоская копия настила на земле только путала бы. Тень остаётся
+  if (threeD) visible(BRIDGE_FLAT_LAYERS, false)
   visible(['issues', 'issues-focus'], editor.layers.issues && !isSim)
   wayCacheRev = -1
 }
+
+const BRIDGE_FLAT_LAYERS = ['bridge-outline', 'bridge-casing', 'surface-bridge', 'junctions-bridge', 'markings-bridge', 'lane-line-bridge', 'lane-arrow-bridge', 'turn-ribbon-bridge', 'turn-line-bridge', 'turn-continuation-bridge']
 
 const BASEMAP_LAYERS = ['basemap', 'basemap-2']
 
@@ -1801,7 +1796,7 @@ function applySimNet(): void {
   applyLoadColors()
 }
 
-/** Подписи объёмов и линии желания: как столбики в Visum, только на самых нагруженных участках. */
+/** Подписи объёмов и корреспонденции по прямой (линии желаний Visum): только на самых нагруженных участках. */
 function applyMacroOverlays(): void {
   const macro = sim.macro
   const projector = editor.projector
@@ -1813,8 +1808,11 @@ function applyMacroOverlays(): void {
   setData('simBarLabels', {
     type: 'FeatureCollection',
     features: top.map((load) => {
-      const lane = load.edge.lanes[0]!
-      const middle = lane.points[Math.floor(lane.points.length / 2)]!
+      // Подпись стоит у столбика своего направления: за правой кромкой, посередине участка по длине.
+      // Раньше она лежала на левой полосе, почти на оси, и было не понять, к какому направлению относится
+      const lane = load.edge.lanes.at(-1)!
+      const outside = offsetPolyline(lane.points, -(HALF_LANE_M + BAR_LABEL_OFFSET_M))
+      const middle = pointAlong(outside, polylineLength(outside) / 2).point
       const value = Math.round((load.volume + load.transitPcu) / 10) * 10
       return {
         type: 'Feature',

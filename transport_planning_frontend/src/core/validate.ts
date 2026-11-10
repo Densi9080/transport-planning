@@ -517,12 +517,19 @@ function checkGeometry(context: Context): void {
     const wayIds = doc.waysOfNode(nodeId).filter((id) => isDrivable(doc.ways.get(id)?.tags))
     const levels = new Set(wayIds.map((id) => wayLevel(doc.way(id).tags ?? {})))
     if (levels.size < 2) continue
-    // Съезд на мост в конце дороги — нормальный стык. Ошибка, если дорога проходит узел насквозь
-    const passesThrough = wayIds.some((id) => {
+    // Съезд концом к дороге другого уровня — нормальный стык: так въезжают на мост, в тоннель,
+    // в подземный паркинг. Ошибка — когда узел насквозь проходят дороги разных уровней (склеенный
+    // крест моста с дорогой под ним) или когда к середине моста или тоннеля примыкает чужой уровень
+    const interior = wayIds.filter((id) => {
       const nds = doc.way(id).nds
       return nds[0] !== nodeId && nds.at(-1) !== nodeId
     })
-    if (!passesThrough) continue
+    const interiorLevels = new Set(interior.map((id) => wayLevel(doc.way(id).tags ?? {})))
+    const structureInterior = interior.some((id) => {
+      const tags = doc.way(id).tags ?? {}
+      return (!!tags.bridge && tags.bridge !== 'no') || (!!tags.tunnel && tags.tunnel !== 'no')
+    })
+    if (interiorLevels.size < 2 && !structureInterior) continue
     const node = doc.node(nodeId)
     issues.push({
       id: `glued-${nodeId}`,

@@ -2,6 +2,7 @@ import type { OsmDoc } from '@/core/doc'
 import { computeHidden, FILTER_OPS, type FilterOp } from '@/core/filter'
 import { bearing, polylineLength, type Projector } from '@/core/geo'
 import { isDrivable, parseProfile, totalWidth } from '@/core/lanes'
+import { isSignalNode } from '@/core/nodeKinds'
 import { buildNetwork, junctionMovements } from '@/core/topology'
 import type { TransitLine } from '@/core/transit'
 import type { OWay } from '@/core/types'
@@ -259,7 +260,7 @@ export function createToolRunner(context: ToolContext) {
         roads_by_type: types,
         roads_without_lanes: drivable.filter((way) => !way.tags?.lanes).length,
         roads_without_maxspeed: drivable.filter((way) => !way.tags?.maxspeed).length,
-        traffic_signals: [...doc.nodes.values()].filter((node) => node.tags?.highway === 'traffic_signals').length,
+        traffic_signals: [...doc.nodes.values()].filter((node) => isSignalNode(node.tags)).length,
         transit_lines: context.lines().length,
         errors: issues.filter((issue) => issue.severity === 'error').length,
         warnings: issues.filter((issue) => issue.severity === 'warning').length,

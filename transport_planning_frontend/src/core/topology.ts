@@ -1,6 +1,7 @@
 import type { OsmDoc } from './doc'
 import { dot, cross, Projector, pointAlong, polylineLength, sub, unit } from './geo'
 import { isDrivable, type LaneProfile, parseProfile } from './lanes'
+import { isSignalNode } from './nodeKinds'
 import type { XY } from './types'
 
 /** Участок дороги между двумя узлами графа. */
@@ -91,8 +92,9 @@ export function buildNetwork(doc: OsmDoc, projector: Projector): Network {
       if (!doc.nodes.has(nd)) return
       piece.push(nd)
       const isLast = index === way.nds.length - 1
-      // Конец дороги весит 1, проход через узел — 2: больше двух значит, что сходятся дороги
-      const isGraphNode = (visits.get(nd) ?? 0) > 2
+      // Конец дороги весит 1, проход через узел — 2: больше двух значит, что сходятся дороги.
+      // Светофор посреди перегона (регулируемый переход) тоже узел: у него стоп-линии и свой план фаз
+      const isGraphNode = (visits.get(nd) ?? 0) > 2 || isSignalNode(doc.nodes.get(nd)?.tags)
       if (piece.length > 1 && (isLast || isGraphNode)) {
         flush()
         piece = [nd]
@@ -184,6 +186,9 @@ export function restrictionsAt(doc: OsmDoc, via: number): Restriction[] {
       else if (type === 'node' && role === 'via') viaNode = ref
     }
     if (viaNode !== via || from === null || to === null) continue
+    // Дорога «куда» осталась за границей выгрузки: запрет «только туда» запер бы подход наглухо,
+    // а запрет «не туда» ни на что не влияет. Такие обрывки отношений не действуют
+    if (!doc.ways.has(to) || !doc.ways.has(from)) continue
     found.push({
       relationId: relation.id,
       kind: value.startsWith('only_') ? 'only' : 'no',
