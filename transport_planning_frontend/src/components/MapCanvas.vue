@@ -1218,24 +1218,15 @@ function onClick(event: MapMouseEvent): void {
   switch (editor.tool) {
     case 'delete':
     case 'select': {
-      // Тройной щелчок по дороге разрезает её в этой точке; узел разреза сразу выбран и тянется мышью
+      // Тройной щелчок по дороге добавляет точку излома: дорога остаётся целой, вершину можно сразу тянуть
       if (original.detail === 3 && editor.tool === 'select' && editor.viewMode !== 'sim' && !editor.objectLocked.links) {
         if (hit?.kind === 'way') {
-          editor.splitAndSelect(hit.id, editor.projector!.toLatLon(hit.point))
+          editor.addVertex(hit.id, editor.projector!.toLatLon(hit.point))
           return
         }
         if (hit?.kind === 'mid') {
-          editor.splitAndSelect(hit.wayId, hit.position)
+          editor.addVertex(hit.wayId, hit.position)
           return
-        }
-        if (hit?.kind === 'node' && editor.doc!.waysOfNode(hit.id).length === 1) {
-          const wayId = editor.doc!.waysOfNode(hit.id)[0]!
-          const nds = editor.doc!.way(wayId).nds
-          if (nds[0] !== hit.id && nds.at(-1) !== hit.id) {
-            editor.splitAtNode(hit.id, wayId)
-            editor.selectOne({ kind: 'node', id: hit.id })
-            return
-          }
         }
       }
       if (hit?.kind === 'mid') return

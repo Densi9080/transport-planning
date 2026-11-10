@@ -1300,12 +1300,15 @@ export const useEditor = defineStore('editor', () => {
     return ok && nodeId !== undefined ? nodeId : null
   }
 
-  /** Тройной щелчок по дороге: разрез в этой точке, узел разреза сразу выбран, его можно тянуть. */
-  function splitAndSelect(wayId: number, position: LatLon): void {
-    const nodeId = splitAtPosition(wayId, position)
-    if (nodeId === null) return
-    selectOne({ kind: 'node', id: nodeId })
-    toast('Дорога разрезана. Узел разреза выбран: его можно перетащить')
+  /**
+   * Тройной щелчок по дороге: точка излома (вершина) в этом месте. Дорога не разрезается и остаётся выбранной,
+   * поэтому новая вершина видна среди остальных и её можно сразу тянуть.
+   */
+  function addVertex(wayId: number, position: LatLon): void {
+    const nodeId = mutate('Точка излома', (d, p) => insertNodeOnWay(d, p, wayId, position))
+    if (nodeId === undefined) return
+    selectOne({ kind: 'way', id: wayId })
+    toast('Добавлена точка излома: потяните её, чтобы поправить линию')
   }
 
   function addFreeNode(position: LatLon): void {
@@ -1766,7 +1769,7 @@ export const useEditor = defineStore('editor', () => {
     joinSelected,
     splitAtNode,
     splitAtPosition,
-    splitAndSelect,
+    addVertex,
     addFreeNode,
     addNodeOnWay,
     toggleOnNode,
