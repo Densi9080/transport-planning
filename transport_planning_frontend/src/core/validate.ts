@@ -5,6 +5,7 @@ import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
 import { checkHiddenUturns, checkMissingOneway, checkRestrictionBypass, checkTransitRoutes } from './networkChecks'
 import { junctionPriority } from './priority'
+import { computeArmGeometries, junctionConnectors } from './scene'
 import { bindPlatform, unboundPlatforms } from './stopBinding'
 import { buildNetwork, wayLevel } from './topology'
 import { buildStopHierarchy, stopIssues } from './stops'
@@ -33,6 +34,7 @@ export type IssueCode =
   | 'lane_change_mismatch'
   | 'stop_hierarchy'
   | 'priority_conflict'
+  | 'lane_order_conflict'
   | 'stop_unbound'
   | 'hidden_uturn'
   | 'restriction_bypass'
@@ -73,6 +75,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
   stop_hierarchy: 'Иерархия остановок',
   priority_conflict: 'Приоритет на перекрёстке',
+  lane_order_conflict: 'Стрелки полос противоречат геометрии узла',
   stop_unbound: 'Остановка не привязана к графу',
   hidden_uturn: 'Разворот через короткий съезд',
   restriction_bypass: 'Запрет обходится через соседний въезд',
@@ -139,6 +142,7 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkSlopes(context)
   checkStops(doc, projector, context.issues)
   checkPriority(doc, projector, context.issues)
+  checkLaneOrder(doc, projector, context.issues)
   const network = buildNetwork(doc, projector)
   checkHiddenUturns(doc, network, context.issues)
   checkRestrictionBypass(doc, network, context.issues)
@@ -806,6 +810,37 @@ function checkPriority(doc: OsmDoc, projector: Projector, issues: Issue[]): void
         wayIds: [],
         nodeIds: [node],
       })
+    })
+  }
+}
+
+/**
+ * Узлы, где ради строгого правила (траектории одного подхода не пересекаются) полосы подхода переставлены
+ * вопреки стрелкам turn:lanes. Это признак ошибки в разметке или в геометрии дорог: стоит проверить на месте.
+ */
+function checkLaneOrder(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
+  const network = buildNetwork(doc, projector)
+  let geometries: ReturnType<typeof computeArmGeometries> | null = null
+  for (const [node, arms] of network.arms) {
+    if (arms.length < 2) continue
+    const tagged = arms.some((arm) => {
+      const turns = arm.atStart ? arm.link.profile.turnsBackward : arm.link.profile.turnsForward
+      return arm.lanesIn > 0 && !!turns && turns.some((turn) => turn && turn !== 'none')
+    })
+    if (!tagged) continue
+    geometries ??= computeArmGeometries(network)
+    const reordered = junctionConnectors(doc, node, arms, geometries).filter((c) => c.againstMarkings)
+    const position = doc.nodes.get(node)
+    if (reordered.length === 0 || !position) continue
+    const ways = [...new Set(reordered.map((c) => c.from.link.wayId))]
+    issues.push({
+      id: `lane-order-${node}`,
+      code: 'lane_order_conflict',
+      severity: 'warning',
+      message: `Стрелки полос на подходе не совпадают с тем, куда ведут выезды: полосы переставлены, чтобы траектории не пересекались. Проверьте turn:lanes или геометрию выездов`,
+      position: { lat: position.lat, lon: position.lon },
+      wayIds: ways,
+      nodeIds: [node],
     })
   }
 }

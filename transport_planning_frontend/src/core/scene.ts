@@ -80,6 +80,7 @@ export interface StaticScene {
 const EMPTY = (): Feature[] => []
 const CORNER_MARGIN_M = 2.5
 const MAX_TRIM_SHARE = 0.45
+const MAX_STUB_TRIM_SHARE = 0.9
 const COLLINEAR_COS = -0.92
 const LANE_ARROW_INTERVAL_M = 70
 const LANE_ARROW_FROM_END_M = 7
@@ -150,7 +151,7 @@ function levelOf(link: Link): number {
 }
 
 /** Сколько отрезать от конца дороги, чтобы её края не заходили на соседние дороги. */
-function armGeometry(arms: Arm[]): Map<Arm, ArmGeometry> {
+function armGeometry(arms: Arm[], farDegree: (arm: Arm) => number = () => 3): Map<Arm, ArmGeometry> {
   const result = new Map<Arm, ArmGeometry>()
   const sorted = [...arms].sort(
     (a, b) => Math.atan2(a.dir.y, a.dir.x) - Math.atan2(b.dir.y, b.dir.x),
@@ -179,7 +180,9 @@ function armGeometry(arms: Arm[]): Map<Arm, ArmGeometry> {
           split = Math.max(split, separationAlong(arm, other, required))
         }
       }
-      trim = Math.min(trim, arm.link.length * MAX_TRIM_SHARE)
+      // Короткий отрезок без перекрёстка на другом конце (продолжение той же дороги) площадка может занять почти
+      // целиком: иначе его начало остаётся внутри полотна широкой дороги и траектории подхода пересекаются
+      trim = Math.min(trim, arm.link.length * (farDegree(arm) <= 2 ? MAX_STUB_TRIM_SHARE : MAX_TRIM_SHARE))
       if (split > 0) trim = Math.max(trim, Math.min(split, arm.link.length * MAX_SPLIT_TRIM_SHARE))
     }
     const along = arm.atStart ? trim : arm.link.length - trim
@@ -241,6 +244,9 @@ function isSeamless(arms: Arm[]): boolean {
   if (arms.length !== 2) return false
   const [a, b] = arms as [Arm, Arm]
   if (dot(a.dir, b.dir) > COLLINEAR_COS * 0.75) return false
+  // Одинаковой ширины мало: при другой раскладке полос по направлениям (например, 2+2 и 4 в одну сторону)
+  // полосы сдвигались бы вбок в одной точке и ложились друг на друга
+  if (a.lanesIn !== b.lanesOut || b.lanesIn !== a.lanesOut) return false
   return Math.abs(totalWidth(a.link.profile) - totalWidth(b.link.profile)) < 0.01
 }
 
@@ -638,6 +644,8 @@ export interface Connector {
   toLane: number
   kind: TurnKind
   points: XY[]
+  /** Полоса переставлена вопреки стрелкам разметки, чтобы траектории подхода не пересекались. */
+  againstMarkings?: boolean
 }
 
 /**
@@ -746,21 +754,35 @@ function untangle(
     if (changed) for (const connector of group) connector.points = build(connector)
   }
 
-  for (const to of arms) {
-    const geometry = geometries.get(to)
-    if (!geometry) continue
-    // Положение начала траектории поперёк выезда: больше — левее по ходу движения в выезде
-    reorder(
-      connectors.filter((c) => c.to === to && !manual.has(c)),
-      (c) => cross(geometry.dir, sub(c.points[0]!, geometry.center)),
-      (c) => c.toLane,
-      (c, lane) => (c.toLane = lane),
-    )
+  const reorderExits = () => {
+    for (const to of arms) {
+      const geometry = geometries.get(to)
+      if (!geometry) continue
+      const group = connectors.filter((c) => c.to === to && !manual.has(c))
+      if (group.length < 2) continue
+      // Подходы упорядочиваются целиком по среднему положению начал поперёк выезда (больше — левее),
+      // а внутри подхода сохраняется порядок его полос: иначе траектории одного подхода перекрестятся
+      const lateral = (c: Connector) => cross(geometry.dir, sub(c.points[0]!, geometry.center))
+      const approachPosition = new Map<Arm, number>()
+      for (const from of new Set(group.map((c) => c.from))) {
+        const own = group.filter((c) => c.from === from)
+        approachPosition.set(from, own.reduce((sum, c) => sum + lateral(c), 0) / own.length)
+      }
+      const lanes = group.map((c) => c.toLane).sort((a, b) => a - b)
+      const sorted = [...group].sort(
+        (a, b) => approachPosition.get(b.from)! - approachPosition.get(a.from)! || a.fromLane - b.fromLane || a.toLane - b.toLane,
+      )
+      let changed = false
+      sorted.forEach((connector, index) => {
+        if (connector.toLane !== lanes[index]) changed = true
+        connector.toLane = lanes[index]!
+      })
+      if (changed) for (const connector of group) connector.points = build(connector)
+    }
   }
-  for (const from of arms) {
+  const reorderApproach = (from: Arm) => {
     const geometry = geometries.get(from)
-    const turns = armTurns(from, true)
-    if (!geometry || (turns && turns.some((turn) => turn && turn !== 'none'))) continue
+    if (!geometry) return
     const travelIn = scale(geometry.dir, -1)
     // Положение конца траектории поперёк подхода: больше — левее по ходу движения на подходе
     reorder(
@@ -770,6 +792,57 @@ function untangle(
       (c, lane) => (c.fromLane = lane),
     )
   }
+
+  reorderExits()
+  for (const from of arms) {
+    const turns = armTurns(from, true)
+    if (turns && turns.some((turn) => turn && turn !== 'none')) continue
+    reorderApproach(from)
+  }
+
+  // Строгое правило: траектории одного подхода не пересекаются никогда. Если стрелки разметки противоречат
+  // геометрии узла, полосы подхода переставляются по геометрии, а узел помечается для проверки данных
+  for (const from of arms) {
+    const own = connectors.filter((c) => c.from === from && !manual.has(c))
+    if (crossingConnectors(own).length === 0) continue
+    const before = new Map(own.map((c) => [c, c.fromLane]))
+    reorderApproach(from)
+    for (const c of own) if (before.get(c) !== c.fromLane) c.againstMarkings = true
+    // Порядок полос верный, а кривые всё равно пересекаются: перестраиваем пару мягче, затем прямее
+    for (const flatten of [GENTLE_REACH, 0]) {
+      const pairs = crossingConnectors(own)
+      if (pairs.length === 0) break
+      for (const connector of new Set(pairs.flat())) connector.points = calmCurve(connector.points, flatten)
+    }
+  }
+}
+
+const GENTLE_REACH = 0.2
+
+/**
+ * Спокойная кривая между теми же концами: кубическая с короткими касательными (reach — доля длины),
+ * при reach = 0 — прямая. Нужна, когда обычная кривая манёвра пересекает соседнюю траекторию того же подхода.
+ */
+function calmCurve(points: XY[], reach: number): XY[] {
+  const start = points[0]!
+  const end = points.at(-1)!
+  const span = dist(start, end)
+  const steps = Math.max(CURVE_STEPS, points.length - 1)
+  if (reach <= 0 || points.length < 3) {
+    return Array.from({ length: steps + 1 }, (_, i) => add(start, scale(sub(end, start), i / steps)))
+  }
+  const startDir = unit(sub(points[1]!, start))
+  const endDir = unit(sub(end, points.at(-2)!))
+  const c1 = add(start, scale(startDir, span * reach))
+  const c2 = sub(end, scale(endDir, span * reach))
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps
+    const u = 1 - t
+    return {
+      x: u * u * u * start.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x,
+      y: u * u * u * start.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y,
+    }
+  })
 }
 
 /**
@@ -829,8 +902,9 @@ export function approachSlots(arms: Arm[]): Map<Arm, number> {
 /** Геометрия концов всех участков: сколько обрезано и как стыкуются. */
 export function computeArmGeometries(network: Network): Map<Arm, ArmGeometry> {
   const geometries = new Map<Arm, ArmGeometry>()
+  const farDegree = (arm: Arm) => network.arms.get(arm.atStart ? arm.link.nodes.at(-1)! : arm.link.nodes[0]!)?.length ?? 1
   for (const arms of network.arms.values()) {
-    for (const [arm, geometry] of armGeometry(arms)) geometries.set(arm, geometry)
+    for (const [arm, geometry] of armGeometry(arms, farDegree)) geometries.set(arm, geometry)
   }
   return geometries
 }
