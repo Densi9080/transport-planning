@@ -20,10 +20,13 @@ ENV PYTHONUNBUFFERED=1 \
 ARG WITH_SUMO=1
 WORKDIR /app
 COPY req.txt ./
+# В slim-образе нет системных библиотек, которые нужны бинарникам SUMO (libexpat и др.),
+# поэтому ставим их и сразу проверяем ldd: если чего-то не хватает, сборка падает с понятным списком
 RUN pip install --no-cache-dir -r req.txt gunicorn==23.0.0 \
     && if [ "$WITH_SUMO" = "1" ]; then \
         apt-get update \
-        && apt-get install -y --no-install-recommends libexpat1 libgomp1 \
+        && apt-get install -y --no-install-recommends \
+            libexpat1 libgomp1 libatomic1 libx11-6 libxext6 libxrender1 libgl1 \
         && rm -rf /var/lib/apt/lists/* \
         && pip install --no-cache-dir eclipse-sumo \
         && SUMO_BIN="$(python -c 'import sumo, os; print(os.path.join(sumo.SUMO_HOME, "bin"))')" \
