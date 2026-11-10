@@ -406,6 +406,40 @@ function lanePoint(geometry: ArmGeometry, laneIndex: number, entering: boolean):
   return add(geometry.center, scale(leftNormal(roadDir), offset))
 }
 
+const CURVE_STEPS = 12
+
+/**
+ * Траектория манёвра от конца полосы подхода к началу полосы выезда.
+ * Кривая выходит из стоп-линии по ходу движения и входит в выезд по его направлению.
+ * Пересечение направлений годится в опорную точку, только если оно впереди подхода и позади выезда:
+ * иначе кривая сначала уходила бы назад. В остальных случаях строится кубическая кривая,
+ * касательная к обеим полосам.
+ */
+export function turnCurve(start: XY, travelIn: XY, end: XY, travelOut: XY): XY[] {
+  const span = dist(start, end)
+  if (span < 1e-6) return [start, end]
+  const denominator = cross(travelIn, travelOut)
+  if (Math.abs(denominator) > 1e-3) {
+    const ahead = cross(sub(end, start), travelOut) / denominator
+    const behind = cross(travelIn, sub(end, start)) / denominator
+    // ahead: насколько точка впереди подхода, behind: насколько она позади начала выезда
+    if (ahead > 0 && behind > 0 && ahead < span * 2 && behind < span * 2) {
+      return quadraticCurve(start, add(start, scale(travelIn, ahead)), end, CURVE_STEPS)
+    }
+  }
+  const reach = span / 3
+  const c1 = add(start, scale(travelIn, reach))
+  const c2 = sub(end, scale(travelOut, reach))
+  return Array.from({ length: CURVE_STEPS + 1 }, (_, i) => {
+    const t = i / CURVE_STEPS
+    const u = 1 - t
+    return {
+      x: u * u * u * start.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x,
+      y: u * u * u * start.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y,
+    }
+  })
+}
+
 /** Соединение полосы подхода с полосой выезда внутри узла. */
 export interface Connector {
   node: number
@@ -464,10 +498,6 @@ export function junctionConnectors(
         pairs.forEach(([lane, toLane]) => {
           const start = lanePoint(fromGeometry, lane, true)
           const end = lanePoint(toGeometry, toLane, false)
-          const travelIn = scale(from.dir, -1)
-          const control =
-            lineIntersection(start, travelIn, end, to.dir) ?? scale(add(start, end), 0.5)
-          const safe = dist(control, start) < dist(start, end) * 2 ? control : scale(add(start, end), 0.5)
           found.push({
             node,
             from,
@@ -475,7 +505,8 @@ export function junctionConnectors(
             fromLane: lane,
             toLane,
             kind,
-            points: quadraticCurve(start, safe, end, 12),
+            // Направления берутся там, где полоса обрезана, а не у центра узла: дорога может изгибаться
+            points: turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir),
           })
         })
       }
@@ -741,6 +772,12 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
       for (const connector of junctionConnectors(doc, node, arms, geometries)) {
         turnPaths.push(lineFeature(connector.points, projector, { turn: connector.kind, node, approach: approaches.get(connector.from) ?? 0, from: connector.from.neighbor, to: connector.to.neighbor }))
       }
+    } else if (arms.length === 2 && !isSeamless(arms)) {
+      // Стык двух отрезков с разным сечением: без соединений полосы обрывались бы у площадки узла
+      for (const connector of junctionConnectors(doc, node, arms, geometries)) {
+        if (dist(connector.points[0]!, connector.points.at(-1)!) < 0.3) continue
+        turnPaths.push(lineFeature(connector.points, projector, { turn: 'through', node, approach: 0, continuation: true, from: connector.from.neighbor, to: connector.to.neighbor }))
+      }
     }
     const nodeTags = doc.node(node).tags
     if (nodeTags?.highway === 'traffic_signals' || nodeTags?.highway === 'stop') {
@@ -793,23 +830,22 @@ export function buildScene(doc: OsmDoc, projector: Projector): { scene: Scene; n
     laneArrows(link, trimmed, level, arrows, projector)
     elevatedSegments(doc, link, startGeometry?.trim ?? 0, endGeometry?.trim ?? 0, offsets.left, elevated, projector)
 
-    // В графе каждая полоса — отдельная линия по ходу движения: так видно число полос и их направление
-    const pushLane = (offset: number, forward: boolean) => {
-      const lane = offsetPolyline(trimmed, offset, startTangent, endTangent)
-      if (lane.length < 2) return
+    // Граф сети как в Visum: отрезок — одна линия от узла до узла, полосы видны только в инженерном виде
+    const forwardLanes = offsets.forward.length
+    const backwardLanes = offsets.backward.length
+    if (link.points.length >= 2 && forwardLanes + backwardLanes > 0) {
+      const onlyBackward = forwardLanes === 0
       graphLinks.push(
-        lineFeature(forward ? lane : [...lane].reverse(), projector, {
+        lineFeature(onlyBackward ? [...link.points].reverse() : link.points, projector, {
           wayId: link.wayId,
           highway: graphRoadClass(highway),
-          oneway: true,
+          oneway: forwardLanes === 0 || backwardLanes === 0,
           reversed: false,
-          lanes: 1,
+          lanes: forwardLanes + backwardLanes,
           level,
         }),
       )
     }
-    offsets.forward.forEach((offset) => pushLane(offset, true))
-    offsets.backward.forEach((offset) => pushLane(offset, false))
   }
 
   buildCrossings(doc, network, crossings, signals, projector)

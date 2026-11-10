@@ -38,6 +38,7 @@ import {
   emptySources,
   ENGINEERING_LAYERS,
   GRAPH_LAYERS,
+  CONTINUATION_LAYERS,
   MODEL_LAYERS,
   SIM_LAYERS,
   themePaint,
@@ -1299,6 +1300,7 @@ function applyView(): void {
   const marks = editor.layers.markings
   const roads = lane && !editor.objectHidden.links
   visible(['lane-line', 'lane-arrow'], roads && !marks)
+  visible(CONTINUATION_LAYERS, roads && !marks)
   visible(TURN_LAYERS, lane && !isSim && editor.layers.turnPaths && !editor.objectHidden.turns && !marks)
   visible(['marking-stop', 'marking-zigzag'], roads && marks)
   const markTop = marks ? 24 : LANE_LINE_ZOOM

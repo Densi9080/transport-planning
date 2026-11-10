@@ -237,15 +237,20 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
     } },
-    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, paint: {
+    { id: 'turn-ribbon', type: 'line', source: 'turnPaths', minzoom: 15, filter: ['!', ['to-boolean', ['get', 'continuation']]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(3, 1.5),
       'line-opacity': 0.22,
     } },
-    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, paint: {
+    { id: 'turn-line', type: 'line', source: 'turnPaths', minzoom: 15.5, filter: ['!', ['to-boolean', ['get', 'continuation']]], paint: {
       'line-color': APPROACH_COLOR,
       'line-width': m(0.3, 0.8),
       'line-opacity': 0.9,
+    } },
+    // Продолжение полос через стык двух отрезков выглядит как сама полоса
+    { id: 'turn-continuation', type: 'line', source: 'turnPaths', minzoom: LANE_LINE_ZOOM, filter: ['to-boolean', ['get', 'continuation']], layout: { 'line-cap': 'round' }, paint: {
+      'line-color': COLORS.laneLine,
+      'line-width': ['interpolate', ['linear'], ['zoom'], LANE_LINE_ZOOM, 0.8, 20, 2.2],
     } },
     { id: 'crossings', type: 'fill', source: 'crossings', minzoom: 15, paint: {
       'fill-color': '#e8e3cf',
@@ -293,7 +298,11 @@ export function buildLayers(lat: number): LayerSpecification[] {
         'motorway', '#ef4444', 'trunk', '#f97316', 'primary', '#f59e0b',
         'secondary', '#eab308', 'tertiary', '#2dd4bf', 'residential', '#60a5fa',
         'unclassified', '#60a5fa', 'living_street', '#a78bfa', 'service', '#71717a', '#a1a1aa'],
-      'line-width': ['interpolate', ['linear'], ['zoom'], 13, 0.7, 17, 1.3, 20, 2.4]
+      // Толщина растёт с числом полос, но остаётся линией: граф не должен превращаться в проезжую часть
+      'line-width': ['interpolate', ['linear'], ['zoom'],
+        13, ['+', 0.8, ['*', 0.15, ['min', ['get', 'lanes'], 6]]],
+        17, ['+', 1.6, ['*', 0.35, ['min', ['get', 'lanes'], 6]]],
+        20, ['+', 2.6, ['*', 0.6, ['min', ['get', 'lanes'], 6]]]],
     } },
     { id: 'graph-direction', type: 'symbol', source: 'graphLinks', filter: ['get', 'oneway'], layout: {
       visibility: 'none',
@@ -615,6 +624,8 @@ export const ENGINEERING_LAYERS = [
 ]
 export const GRAPH_LAYERS = ['graph-links', 'graph-direction', 'graph-nodes']
 export const TURN_LAYERS = ['turn-ribbon', 'turn-line']
+/** Продолжение полос показывается вместе с полосами, даже если траектории манёвров скрыты. */
+export const CONTINUATION_LAYERS = ['turn-continuation']
 export const SIM_LAYERS = ['sim-load', 'sim-bars', 'sim-bar-labels', 'sim-od', 'sim-zones', 'sim-jams', 'sim-signals']
 
 export type ThemeName = 'light' | 'dark'
