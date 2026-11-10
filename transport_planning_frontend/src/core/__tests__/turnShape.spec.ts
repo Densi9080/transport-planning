@@ -3,10 +3,34 @@ import { describe, expect, it } from 'vitest'
 import { OsmDoc } from '../doc'
 import { dist, Projector } from '../geo'
 import { nodeConnectors } from '../laneOps'
+import { laneOffsets, parseProfile, withLaneShift } from '../lanes'
 import { type Connector, crossingConnectors, curveMiddle, readTurnShapes, shapedCurve, turnCurve, writeTurnShape } from '../scene'
 import type { RawDocument } from '../types'
 
 const M = 1 / 111_320
+
+describe('сдвиг полосы', () => {
+  it('полоса сдвигается вправо по ходу движения в обоих направлениях, разметка остаётся', () => {
+    const base = { highway: 'primary', lanes: '4', 'lanes:forward': '2', 'lanes:backward': '2' }
+    const before = laneOffsets(parseProfile(base))
+    let tags = withLaneShift(base, 'forward', 1, 0.4)
+    tags = withLaneShift(tags, 'backward', 0, 0.3)
+    expect(tags['tp:lane_shift:forward']).toBe('0|0.4')
+    const after = laneOffsets(parseProfile(tags))
+    // Попутная полоса уходит вправо по ходу, то есть к меньшему смещению; встречная — к большему
+    expect(after.forward[1]! - before.forward[1]!).toBeCloseTo(-0.4)
+    expect(after.backward[0]! - before.backward[0]!).toBeCloseTo(0.3)
+    expect(after.forwardBoundaries).toEqual(before.forwardBoundaries)
+    expect(after.divider).toBe(before.divider)
+  })
+
+  it('сдвиг ограничен третью ширины полосы и снимается нулём', () => {
+    const base = { highway: 'residential', oneway: 'yes', lanes: '2' }
+    const tags = withLaneShift(base, 'forward', 0, 5)
+    expect(parseProfile(tags).shiftForward[0]).toBeCloseTo(parseProfile(base).widthsForward[0]! / 3)
+    expect(withLaneShift(tags, 'forward', 0, 0)).toEqual(base)
+  })
+})
 
 describe('форма манёвра', () => {
   it('середина кривой встаёт туда, куда её перетащили, концы остаются на полосах', () => {

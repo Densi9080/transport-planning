@@ -4,7 +4,7 @@ import { computed, markRaw, reactive, ref, shallowRef, watch } from 'vue'
 import { loadProject, saveChanges } from '@/api'
 import { OsmDoc } from '@/core/doc'
 import { computeHidden, type FilterLogic, type FilterMode, type FilterRule, NOTHING_HIDDEN } from '@/core/filter'
-import { offsetPolyline, Projector, segmentsCross, smoothCurve } from '@/core/geo'
+import { nearestOnSegment, offsetPolyline, Projector, segmentsCross, smoothCurve } from '@/core/geo'
 import {
   addNode,
   addWay,
@@ -28,7 +28,7 @@ import type { CrsEntry } from '@/core/crsCatalog'
 import { arrivalArm, departureArm, laneAtPoint, lanePolyline, type LanePort, lanePorts, laneStubNearNode } from '@/core/lanePick'
 import { nodeConnectors, resetLaneConnections, setLaneConnection, setMovementLanes } from '@/core/laneOps'
 import { type TurnAttrs, writeTurnAttrs } from '@/core/turnAttrs'
-import { laneOffsets, parseProfile, totalWidth, withLanes } from '@/core/lanes'
+import { laneOffsets, parseProfile, totalWidth, withLanes, withLaneShift } from '@/core/lanes'
 import { buildNetwork, junctionMovements } from '@/core/topology'
 import {
   addSpeedBump,
@@ -792,6 +792,32 @@ export const useEditor = defineStore('editor', () => {
     const net = network.value
     const hit = net ? laneAtPoint(net, point) : null
     selectedLane.value = hit && hit.link.wayId === wayId ? { wayId, forward: hit.forward, lane: hit.lane, count: hit.count, points: lanePolyline(hit) } : null
+  }
+
+  /**
+   * Сдвиг выбранной полосы вбок, м: положительный — вправо по ходу движения.
+   * Подсветка пересчитывается по новой геометрии на том же участке дороги.
+   */
+  function setLaneShift(shift: number): void {
+    const lane = selectedLane.value
+    if (!lane) return
+    const way = doc.value?.ways.get(lane.wayId)
+    if (!way) return
+    const middle = lane.points[Math.floor(lane.points.length / 2)]!
+    mutate('Сдвиг полосы', (d) => setWayTags(d, lane.wayId, withLaneShift(way.tags ?? {}, lane.forward ? 'forward' : 'backward', lane.lane, shift)))
+    // Ближайший к старой подсветке участок той же дороги: дорога может состоять из нескольких отрезков сети
+    const links = (network.value?.links ?? []).filter((link) => link.wayId === lane.wayId)
+    let best: { link: (typeof links)[number]; distance: number } | null = null
+    for (const link of links) {
+      for (let i = 1; i < link.points.length; i++) {
+        const distance = nearestOnSegment(middle, link.points[i - 1]!, link.points[i]!).distance
+        if (!best || distance < best.distance) best = { link, distance }
+      }
+    }
+    if (!best) return
+    const offsets = laneOffsets(best.link.profile)
+    const offset = (lane.forward ? offsets.forward : offsets.backward)[lane.lane]
+    if (offset !== undefined) selectedLane.value = { ...lane, points: lanePolyline({ link: best.link, offset }) }
   }
 
   function selectTurn(node: number, from: number, to: number, fromLane: number | null = null): void {
@@ -1612,6 +1638,7 @@ export const useEditor = defineStore('editor', () => {
     setTurnLane,
     turnShape,
     setTurnShape,
+    setLaneShift,
     setTurnAllowed,
     applyTurnTemplate,
     updateTurnAttrs,

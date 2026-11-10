@@ -20,6 +20,13 @@ export interface LaneProfile {
   changeBackward: string[] | null
   /** Число полос не задано в файле и взято по умолчанию для типа дороги. */
   inferred: boolean
+  /**
+   * Сдвиг средней линии каждой полосы вбок, м: положительный — вправо по ходу её движения.
+   * Тег tp:lane_shift (как width:lanes, по направлениям — :forward и :backward). Разметка остаётся на месте:
+   * так подгоняют траекторию полосы под реальную, не меняя число и ширину полос.
+   */
+  shiftForward: number[]
+  shiftBackward: number[]
 }
 
 export const DRIVABLE = new Set([
@@ -158,6 +165,14 @@ export function parseProfile(tags: Tags): LaneProfile {
     }
   }
 
+  const shiftsOf = (key: string, widths: number[]): number[] => {
+    const parsed = parseLaneShifts(tags[key], widths.length)
+    // Полоса не выходит за свои границы: сдвиг не больше трети её ширины
+    return widths.map((width, i) => clamp(parsed?.[i] ?? 0, -width / 3, width / 3))
+  }
+  const shiftForward = shiftsOf(oneway && !reversed ? LANE_SHIFT_TAG : `${LANE_SHIFT_TAG}:forward`, widthsForward)
+  const shiftBackward = shiftsOf(oneway && reversed ? LANE_SHIFT_TAG : `${LANE_SHIFT_TAG}:backward`, widthsBackward)
+
   return {
     forward,
     backward,
@@ -170,7 +185,33 @@ export function parseProfile(tags: Tags): LaneProfile {
     changeForward,
     changeBackward,
     inferred,
+    shiftForward,
+    shiftBackward,
   }
+}
+
+export const LANE_SHIFT_TAG = 'tp:lane_shift'
+
+function parseLaneShifts(value: string | undefined, count: number): number[] | null {
+  if (value === undefined || count === 0) return null
+  const parts = value.split('|').map((part) => Number.parseFloat(part))
+  if (parts.length !== count || parts.some((part) => !Number.isFinite(part))) return null
+  return parts
+}
+
+/** Записывает сдвиг одной полосы. Индекс — слева направо по ходу движения, как в turn:lanes. */
+export function withLaneShift(tags: Tags, direction: TravelDirection, lane: number, shift: number): Tags {
+  const profile = parseProfile(tags)
+  const forward = direction === 'forward'
+  const count = forward ? profile.forward : profile.backward
+  if (lane < 0 || lane >= count) return tags
+  const values = [...(forward ? profile.shiftForward : profile.shiftBackward)]
+  values[lane] = Math.round(shift * 100) / 100
+  const key = isOneway(tags) ? LANE_SHIFT_TAG : `${LANE_SHIFT_TAG}:${direction}`
+  const next: Tags = { ...tags }
+  if (values.every((value) => Math.abs(value) < 0.005)) delete next[key]
+  else next[key] = values.map((value) => formatMeters(value)).join('|')
+  return next
 }
 
 export const MIN_LANE_WIDTH = 2
@@ -302,19 +343,20 @@ export function laneOffsets(profile: LaneProfile): LaneOffsets {
   const width = totalWidth(profile)
   const backwardWidth = profile.widthsBackward.reduce((sum, value) => sum + value, 0)
   const divider = width / 2 - backwardWidth
-  const walk = (widths: number[], sign: number) => {
+  const walk = (widths: number[], sign: number, shifts: number[]) => {
     const centers: number[] = []
     const boundaries: number[] = []
     let walked = 0
     widths.forEach((value, index) => {
-      centers.push(divider + sign * (walked + value / 2))
+      // Вправо по ходу движения — это от оси для встречных полос и к оси для попутных
+      centers.push(divider + sign * (walked + value / 2 + (shifts[index] ?? 0)))
       walked += value
       if (index < widths.length - 1) boundaries.push(divider + sign * walked)
     })
     return { centers, boundaries }
   }
-  const forward = walk(profile.widthsForward, -1)
-  const backward = walk(profile.widthsBackward, 1)
+  const forward = walk(profile.widthsForward, -1, profile.shiftForward ?? [])
+  const backward = walk(profile.widthsBackward, 1, profile.shiftBackward ?? [])
   return {
     forward: forward.centers,
     backward: backward.centers,
