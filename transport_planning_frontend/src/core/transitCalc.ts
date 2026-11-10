@@ -1,9 +1,8 @@
 import type { OsmDoc } from './doc'
 import { dist, nearestOnSegment, type Projector } from './geo'
-import { matchesNode } from './netObjects'
 import { departures, type IntervalPeriod, parseIntervalPeriods, peakInterval, serviceWindow, type ServiceWindow } from './timetable'
 import { lineSegments, type TransitLine, type TransitMode } from './transit'
-import type { LatLon, ONode, Tags, XY } from './types'
+import type { LatLon, Tags, XY } from './types'
 
 /**
  * Показатели маршрута в иерархии Visum: линия объединяет маршруты по направлениям,
@@ -14,7 +13,6 @@ const DEFAULT_SPEED_KMH: Record<TransitMode, number> = { bus: 22, trolleybus: 20
 const DEFAULT_CAPACITY: Record<TransitMode, number> = { bus: 80, trolleybus: 90, tram: 150, minibus: 20, share_taxi: 20 }
 export const DEFAULT_DWELL_S = 20
 export const DEFAULT_LAYOVER_MIN = 5
-const STOP_AREA_REACH_M = 60
 
 export interface ProfilePoint {
   node: number
@@ -221,33 +219,4 @@ export function groupLines(lines: TransitLine[]): { key: string; ref: string; mo
 export function oppositeRoute(line: TransitLine, lines: TransitLine[]): TransitLine | null {
   const same = lines.filter((other) => other.id !== line.id && other.ref === line.ref && other.mode === line.mode)
   return same.find((other) => other.from === line.to && other.to === line.from) ?? same[0] ?? null
-}
-
-/** Зона остановки принадлежит пункту: явно заданному либо ближайшему. */
-export function stopPointOfArea(doc: OsmDoc, projector: Projector, area: ONode): { node: ONode; explicit: boolean } | null {
-  const explicit = doc.nodes.get(Number(area.tags?.['tp:stop_point']))
-  if (explicit) return { node: explicit, explicit: true }
-  const origin = projector.toXY(area)
-  let best: ONode | null = null
-  let bestDistance = STOP_AREA_REACH_M
-  for (const node of doc.nodes.values()) {
-    if (!matchesNode('stopPoints', node, doc)) continue
-    const distance = dist(projector.toXY(node), origin)
-    if (distance < bestDistance) {
-      bestDistance = distance
-      best = node
-    }
-  }
-  return best ? { node: best, explicit: false } : null
-}
-
-export function nearStopPoints(doc: OsmDoc, projector: Projector, area: ONode, reachM: number): { node: ONode; distanceM: number }[] {
-  const origin = projector.toXY(area)
-  const found: { node: ONode; distanceM: number }[] = []
-  for (const node of doc.nodes.values()) {
-    if (!matchesNode('stopPoints', node, doc)) continue
-    const distanceM = dist(projector.toXY(node), origin)
-    if (distanceM <= reachM) found.push({ node, distanceM })
-  }
-  return found.sort((a, b) => a.distanceM - b.distanceM)
 }

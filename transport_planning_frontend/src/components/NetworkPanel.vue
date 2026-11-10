@@ -99,6 +99,8 @@ interface Item {
   /** Сколько объектов стоит за строкой: в узле их может быть несколько. */
   weight?: number
   select?: SelectedItem
+  /** Остановка — отношение: её выбор отдельный от выбора узлов и дорог. */
+  stop?: number
   position?: LatLon
 }
 
@@ -138,10 +140,9 @@ const index = computed<Record<NetObject, Item[]>>(() => {
     }
   }
 
-  for (const relation of doc.relations.values()) {
-    if (relation.tags?.public_transport !== 'stop_area') continue
-    const first = relation.members.find(([type, ref]) => type === 'node' && doc.nodes.has(ref))
-    result.stops.push({ key: `r${relation.id}`, label: relation.tags.name ?? `Остановка ${relation.id}`, sub: `объектов ${relation.members.length}`, tags: relation.tags, position: first ? doc.nodes.get(first[1]) : undefined })
+  for (const stop of editor.stopHierarchy?.stops.values() ?? []) {
+    const relation = doc.relations.get(stop.id)
+    result.stops.push({ key: `r${stop.id}`, label: stop.name, sub: `зон ${stop.areas.length}, пунктов ${stop.points.length}`, tags: relation?.tags, stop: stop.id, position: stop.position ?? undefined })
   }
   return result
 })
@@ -215,11 +216,16 @@ function toggleVisible(row: Row): void {
 }
 
 function showItem(item: Item): void {
+  if (item.stop !== undefined) {
+    editor.focusStop(item.stop)
+    return
+  }
   if (item.select) editor.selectOne(item.select)
   if (item.position) editor.focusOn(item.position, 18)
 }
 
 function isSelected(item: Item): boolean {
+  if (item.stop !== undefined) return editor.selectedStopId === item.stop
   return !!item.select && editor.selection.some((entry) => entry.kind === item.select!.kind && entry.id === item.select!.id)
 }
 </script>

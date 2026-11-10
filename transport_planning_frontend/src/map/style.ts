@@ -455,23 +455,35 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'circle-stroke-color': '#111827',
       'circle-stroke-width': 1,
     } },
+    // Остановка: пунктирный контур вокруг своих зон и пунктов
+    { id: 'net-stop-fill', type: 'fill', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stopShape'], paint: {
+      'fill-color': ['case', ['get', 'selected'], 'rgba(250,204,21,0.16)', 'rgba(147,197,253,0.07)'],
+    } },
+    { id: 'net-stop', type: 'line', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stopShape'], paint: {
+      'line-color': ['case', ['get', 'selected'], '#facc15', '#93c5fd'],
+      'line-width': ['case', ['get', 'selected'], 2.5, 1.5],
+      'line-dasharray': [3, 2],
+    } },
+    { id: 'net-stop-label', type: 'symbol', source: 'netStops', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'stopLabel'], layout: {
+      'icon-image': ['get', 'image'],
+      'icon-anchor': 'bottom',
+      'icon-allow-overlap': false,
+    } },
+    // Зона: квадрат у дороги, платформа-линия — толстая линия
+    { id: 'net-stop-area', type: 'fill', source: 'netStops', minzoom: 15, filter: ['==', ['get', 'kind'], 'area'], paint: {
+      'fill-color': ['case', ['==', ['get', 'stop'], null], 'rgba(248,113,113,0.35)', 'rgba(96,165,250,0.45)'],
+      'fill-outline-color': '#60a5fa',
+    } },
+    { id: 'net-stop-area-line', type: 'line', source: 'netStops', minzoom: 15, filter: ['==', ['get', 'kind'], 'areaLine'], layout: { 'line-cap': 'butt' }, paint: {
+      'line-color': ['case', ['==', ['get', 'stop'], null], 'rgba(248,113,113,0.6)', 'rgba(96,165,250,0.6)'],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 15, 2, 19, 8],
+    } },
+    // Пункт: точка на дороге, без зоны — красная
     { id: 'net-stop-point', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'point'], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 6],
-      'circle-color': '#2563eb',
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 2.5, 18, 5],
+      'circle-color': ['case', ['get', 'orphan'], '#ef4444', '#1d4ed8'],
       'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 1,
-    } },
-    { id: 'net-stop-area', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'area'], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 6],
-      'circle-color': 'rgba(37,99,235,0.2)',
-      'circle-stroke-color': '#60a5fa',
-      'circle-stroke-width': 1.5,
-    } },
-    { id: 'net-stop', type: 'circle', source: 'netStops', minzoom: 14, filter: ['==', ['get', 'kind'], 'stop'], paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 6, 18, 14],
-      'circle-color': 'rgba(0,0,0,0)',
-      'circle-stroke-color': '#93c5fd',
-      'circle-stroke-width': 2,
+      'circle-stroke-width': 1.2,
     } },
     { id: 'traffic-lane', type: 'line', source: 'trafficLoad', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: {
       'line-color': ['interpolate', ['linear'], ['get', 'ratio'], 0, '#22c55e', 0.5, '#facc15', 0.8, '#f97316', 1, '#dc2626'],
@@ -557,10 +569,10 @@ export function buildLayers(lat: number): LayerSpecification[] {
       'fill-extrusion-height': ['get', 'top'],
       'fill-extrusion-opacity': 0.92,
     } },
+    // Связь зоны со своими пунктами
     { id: 'net-stop-link', type: 'line', source: 'netStops', minzoom: 15.5, filter: ['==', ['get', 'kind'], 'link'], paint: {
       'line-color': '#60a5fa',
       'line-width': 1.2,
-      'line-dasharray': [2, 2],
     } },
     { id: 'overlay-band', type: 'line', source: 'overlay', filter: ['==', ['get', 'role'], 'band'], layout: { 'line-cap': 'round' }, paint: {
       'line-color': '#facc15',

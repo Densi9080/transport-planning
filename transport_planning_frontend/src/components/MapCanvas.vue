@@ -25,7 +25,8 @@ import { buildScene, buildStaticScene, type StaticScene } from '@/core/scene'
 import { laneLineFeatures } from '@/core/laneLines'
 import { lineSegments } from '@/core/transit'
 import { computeFlows } from '@/core/ridership'
-import { computeRoute, oppositeRoute, profileSpans, routeParams, stopPointOfArea } from '@/core/transitCalc'
+import { paddedHull } from '@/core/stops'
+import { computeRoute, oppositeRoute, profileSpans, routeParams } from '@/core/transitCalc'
 import { wayHeights } from '@/core/elevation'
 import { CUSTOM_TYPES, type CustomObject, customObjectOf, matchesNode, TP_TYPE } from '@/core/netObjects'
 import type { LatLon, ONode, XY } from '@/core/types'
@@ -347,28 +348,52 @@ function lineLngLat(coordinates: number[][], properties: Record<string, unknown>
   return { type: 'Feature', properties, geometry: { type: 'LineString', coordinates } }
 }
 
+const AREA_HALF_M = 3.5
+const STOP_PADDING_M = 9
+
+/**
+ * Остановки в иерархии Visum: пункт — точка на дороге, зона — квадрат у дороги с линиями к своим пунктам,
+ * остановка — пунктирный контур вокруг всех своих зон и пунктов с названием.
+ */
 function stopObjectFeatures(): Feature[] {
   const doc = editor.doc!
+  const projector = editor.projector!
+  const hierarchy = editor.stopHierarchy
   const features: Feature[] = []
-  for (const node of doc.nodes.values()) {
-    if (matchesNode('stopPoints', node, doc)) features.push(pointOf(node, { kind: 'point' }))
-    if (matchesNode('stopAreas', node, doc)) {
-      features.push(pointOf(node, { kind: 'area' }))
-      const bound = stopPointOfArea(doc, editor.projector!, node)
-      if (bound) features.push(lineLngLat([[node.lon, node.lat], [bound.node.lon, bound.node.lat]], { kind: 'link' }))
+  if (!hierarchy) return features
+  const selectedStop = editor.selectedStopId
+  const polygon = (ring: XY[], properties: Record<string, unknown>): Feature => {
+    const coordinates = [...ring, ring[0]!].map((p) => projector.toLngLat(p))
+    return { type: 'Feature', properties, geometry: { type: 'Polygon', coordinates: [coordinates] } }
+  }
+
+  for (const stop of hierarchy.stops.values()) {
+    const members = [...stop.areas.map((key) => hierarchy.areas.get(key)!.position), ...stop.points.map((id) => doc.node(id))]
+    if (members.length === 0 || !stop.position) continue
+    const hull = paddedHull(members.map((p) => projector.toXY(p)), STOP_PADDING_M)
+    features.push(polygon(hull, { kind: 'stopShape', stop: stop.id, selected: stop.id === selectedStop }))
+    const top = hull.reduce((best, p) => (p.y > best.y ? p : best), hull[0]!)
+    features.push(pointOf(projector.toLatLon(top), { kind: 'stopLabel', stop: stop.id, image: ensureLabelImage(map!, stop.name, editor.theme) }))
+  }
+
+  for (const area of hierarchy.areas.values()) {
+    const center = projector.toXY(area.position)
+    if (area.kind === 'node') {
+      const h = AREA_HALF_M
+      features.push(polygon([{ x: center.x - h, y: center.y - h }, { x: center.x + h, y: center.y - h }, { x: center.x + h, y: center.y + h }, { x: center.x - h, y: center.y + h }], { kind: 'area', stop: area.stop }))
+    } else {
+      const way = doc.ways.get(area.id)
+      const coordinates = (way?.nds ?? []).map((id) => doc.nodes.get(id)).filter((n): n is NonNullable<typeof n> => !!n).map((n) => [n.lon, n.lat])
+      if (coordinates.length >= 2) features.push(lineLngLat(coordinates, { kind: 'areaLine', stop: area.stop }))
+    }
+    for (const id of area.points) {
+      const node = doc.node(id)
+      features.push(lineLngLat([[area.position.lon, area.position.lat], [node.lon, node.lat]], { kind: 'link' }))
     }
   }
-  for (const way of doc.ways.values()) {
-    const node = way.tags?.public_transport === 'platform' ? doc.nodes.get(way.nds[0]!) : undefined
-    if (node) features.push(pointOf(node, { kind: 'area' }))
-  }
-  for (const relation of doc.relations.values()) {
-    if (relation.tags?.public_transport !== 'stop_area') continue
-    const nodes = relation.members.filter(([type, ref]) => type === 'node' && doc.nodes.has(ref)).map(([, ref]) => doc.node(ref))
-    if (nodes.length === 0) continue
-    const lat = nodes.reduce((sum, node) => sum + node.lat, 0) / nodes.length
-    const lon = nodes.reduce((sum, node) => sum + node.lon, 0) / nodes.length
-    features.push(pointOf({ lat, lon }, { kind: 'stop' }))
+
+  for (const point of hierarchy.points.values()) {
+    features.push(pointOf(point.node, { kind: 'point', orphan: !point.area }))
   }
   return features
 }
@@ -1125,6 +1150,29 @@ function onClick(event: MapMouseEvent): void {
         if (id !== undefined) editor.selectLine(id)
         return
       }
+      // В режиме «Остановки» щелчок выбирает остановку целиком: по контуру, зоне или пункту
+      if (editor.activeObject === 'stops' && !isSim && editor.tool !== 'delete') {
+        const hierarchy = editor.stopHierarchy
+        let stopId: number | null = null
+        if (hit?.kind === 'node' && hierarchy) {
+          const key = hierarchy.areas.has(`node/${hit.id}`) ? `node/${hit.id}` : (hierarchy.points.get(hit.id)?.area ?? null)
+          stopId = key ? (hierarchy.areas.get(key)?.stop ?? null) : null
+        }
+        if (stopId === null) {
+          const { x, y } = event.point
+          const shape = map!.queryRenderedFeatures([[x - 3, y - 3], [x + 3, y + 3]], { layers: ['net-stop-fill', 'net-stop-label'] })[0]
+          stopId = (shape?.properties?.stop as number | undefined) ?? null
+        }
+        if (stopId !== null) {
+          editor.selectStop(stopId)
+          return
+        }
+        if (!hit) {
+          editor.select([])
+          editor.selectStop(null)
+          return
+        }
+      }
       if (editor.activeObject === 'turns' && !isSim && !editor.objectLocked.turns) {
         const { x, y } = event.point
         const turn = map!.queryRenderedFeatures([[x - TURN_PICK_PX, y - TURN_PICK_PX], [x + TURN_PICK_PX, y + TURN_PICK_PX]], { layers: ['turn-line', 'turn-ribbon'] })[0]
@@ -1309,8 +1357,8 @@ function applyView(): void {
   m.setLayerZoomRange('markings-lane', 16, markTop)
   m.setLayerZoomRange('markings-lane-solid', 15.5, markTop)
   visible(['net-stop-point'], !isSim && !editor.objectHidden.stopPoints)
-  visible(['net-stop-area', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
-  visible(['net-stop'], !isSim && !editor.objectHidden.stops)
+  visible(['net-stop-area', 'net-stop-area-line', 'net-stop-link'], !isSim && !editor.objectHidden.stopAreas)
+  visible(['net-stop', 'net-stop-fill', 'net-stop-label'], !isSim && !editor.objectHidden.stops)
   visible(['crossings'], lane && editor.layers.crossings)
   visible(['signals'], editor.layers.signals)
   visible(['traffic-signs'], editor.layers.trafficSigns)
@@ -1803,6 +1851,9 @@ watch(() => editor.hidden, () => {
 })
 watch(() => [editor.selectedLineId, editor.layers.transit], renderTransit)
 watch(() => editor.transitLoadShown, renderTransitLoad)
+watch(() => editor.selectedStopId, () => {
+  if (ready && editor.doc) setData('netStops', { type: 'FeatureCollection', features: stopObjectFeatures() })
+})
 watch(() => editor.selection, scheduleOverlay)
 watch(() => editor.proposalTargets, scheduleOverlay)
 watch(() => [editor.issues, editor.focusedIssue], renderIssues)

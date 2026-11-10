@@ -4,6 +4,7 @@ import { dist, nearestOnSegment, Projector, segmentsCross } from './geo'
 import { isDrivable, isOneway, parseProfile, parseTurnLanes } from './lanes'
 import { insertNodeOnWay, mergeNodes, setWayTags, unglueNode } from './ops'
 import { wayLevel } from './topology'
+import { buildStopHierarchy, stopIssues } from './stops'
 import type { LatLon, ORelation, OWay, XY } from './types'
 
 export type Severity = 'error' | 'warning' | 'info'
@@ -27,6 +28,7 @@ export type IssueCode =
   | 'no_lanes'
   | 'steep_slope'
   | 'lane_change_mismatch'
+  | 'stop_hierarchy'
 
 export interface Issue {
   id: string
@@ -59,6 +61,7 @@ export const ISSUE_TITLES: Record<IssueCode, string> = {
   no_lanes: 'Не указано число полос',
   steep_slope: 'Слишком крутой уклон',
   lane_change_mismatch: 'Правил перестроения не столько, сколько полос',
+  stop_hierarchy: 'Иерархия остановок',
 }
 
 const BROKEN_JUNCTION_M = 4
@@ -117,6 +120,7 @@ export function validate(doc: OsmDoc, projector: Projector): Issue[] {
   checkSignals(context)
   checkRestrictions(context)
   checkSlopes(context)
+  checkStops(doc, projector, context.issues)
 
   const order: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
   return context.issues.sort((a, b) => order[a.severity] - order[b.severity])
@@ -716,5 +720,27 @@ export function connectivityReport(doc: OsmDoc): ConnectivityReport {
     isolatedWays,
     oneDirectionWays,
     ok: isolatedWays.length === 0 && oneDirectionWays.length === 0,
+  }
+}
+
+/** Пункт без зоны и остановка без пунктов — ошибки модели ОТ, остальное предупреждения. */
+function checkStops(doc: OsmDoc, projector: Projector, issues: Issue[]): void {
+  const hierarchy = buildStopHierarchy(doc, projector)
+  for (const issue of stopIssues(hierarchy)) {
+    const { kind, id } = issue.target
+    let position: LatLon | null = null
+    if (kind === 'node') position = doc.nodes.get(id) ?? null
+    else if (kind === 'way') position = hierarchy.areas.get(`way/${id}`)?.position ?? null
+    else position = hierarchy.stops.get(id)?.position ?? null
+    if (!position) continue
+    issues.push({
+      id: `stop-${issue.kind}-${kind}-${id}`,
+      code: 'stop_hierarchy',
+      severity: issue.kind === 'point-without-area' || issue.kind === 'stop-without-points' ? 'warning' : 'info',
+      message: issue.title,
+      position: { lat: position.lat, lon: position.lon },
+      wayIds: kind === 'way' ? [id] : [],
+      nodeIds: kind === 'node' ? [id] : [],
+    })
   }
 }

@@ -58,6 +58,19 @@ import type { LatLon, Tags, XY } from '@/core/types'
 import type { BasemapId, ThemeName } from '@/map/style'
 import { type Issue, validate } from '@/core/validate'
 import { customObjectTags, isCustomObject, matchesNode, matchesWay, type NetObject, type ObjectFilter, passesFilter, pickTypeOf } from '@/core/netObjects'
+import {
+  AREA_REACH_M,
+  areaKey,
+  buildStopHierarchy,
+  createStopForArea,
+  moveAreaToStop,
+  nearAreas,
+  nearStops,
+  parseAreaKey,
+  sideOfRoad,
+  type StopHierarchy,
+  withStopArea,
+} from '@/core/stops'
 
 export type Tool =
   | 'select'
@@ -175,7 +188,10 @@ const CRS_RECENT_KEY = 'osm-editor-crs-recent'
 const CRS_CUSTOM_KEY = 'osm-editor-crs-custom'
 const CRS_RECENT_LIMIT = 8
 const CONNECTOR_STUB_M = 25
-const STOP_GROUP_RADIUS_M = 100
+/** Новая зона входит в остановку, до центра которой не дальше этого. */
+const STOP_JOIN_RADIUS_M = 150
+/** Новая зона ставится сбоку от дороги, справа по ходу её направления. */
+const AREA_SIDE_OFFSET_M = 6
 const TURN_MARK_M = 18
 
 function readStored(key: string): string | null {
@@ -376,6 +392,54 @@ export const useEditor = defineStore('editor', () => {
 
   const selectedLine = computed(() => lines.value.find((line) => line.id === selectedLineId.value) ?? null)
 
+  /** Остановка → зоны → пункты, как в Visum. */
+  const stopHierarchy = computed<StopHierarchy | null>(() => {
+    void rev.value
+    return doc.value && projector.value ? markRaw(buildStopHierarchy(doc.value, projector.value)) : null
+  })
+  const selectedStopId = ref<number | null>(null)
+  const selectedStop = computed(() => (selectedStopId.value === null ? null : (stopHierarchy.value?.stops.get(selectedStopId.value) ?? null)))
+
+  function selectStop(id: number | null): void {
+    selectedStopId.value = id
+    if (id !== null) selection.value = []
+  }
+
+  function focusStop(id: number): void {
+    selectStop(id)
+    const position = stopHierarchy.value?.stops.get(id)?.position
+    if (position) focusOn(position, 18.5)
+  }
+
+  function setPointArea(pointId: number, key: string | null): void {
+    mutate('Пункт в зоне остановки', (d) => setNodeTags(d, pointId, withStopArea(d.node(pointId).tags, key)))
+  }
+
+  function setAreaStop(key: string, stopId: number | null): void {
+    const area = parseAreaKey(key)
+    if (!area) return
+    mutate('Зона в остановке', (d) => moveAreaToStop(d, area.kind, area.id, stopId))
+  }
+
+  function createStopFromArea(key: string, name: string): void {
+    const hierarchy = stopHierarchy.value
+    if (!hierarchy) return
+    const id = mutate('Новая остановка', (d) => createStopForArea(d, hierarchy, key, name))
+    if (id !== undefined) selectStop(id)
+  }
+
+  function renameStop(id: number, name: string): void {
+    mutate('Название остановки', (d) => {
+      const relation = d.relations.get(id)
+      if (relation) d.putRelation({ ...relation, tags: { ...relation.tags, name } })
+    })
+  }
+
+  function deleteStop(id: number): void {
+    mutate('Удаление остановки', (d) => d.removeRelation(id))
+    if (selectedStopId.value === id) selectedStopId.value = null
+  }
+
   const preset = computed(
     () => ROAD_PRESETS.find((item) => item.id === presetId.value) ?? ROAD_PRESETS[0]!,
   )
@@ -410,6 +474,8 @@ export const useEditor = defineStore('editor', () => {
     return doc.value?.changeCount ?? 0
   })
   watch(selection, (items) => {
+    // Остановка — отношение, а не узел: выбор любого объекта на карте снимает её выбор
+    if (items.length > 0) selectedStopId.value = null
     const turn = selectedTurn.value
     if (turn && !items.some((item) => item.kind === 'node' && item.id === turn.node)) selectedTurn.value = null
     const lane = selectedLane.value
@@ -966,41 +1032,72 @@ export const useEditor = defineStore('editor', () => {
     if (id !== undefined) selectOne({ kind: 'node', id })
   }
 
+  /**
+   * Пункт ставится на дорогу. Как в Visum, он сразу входит в зону: в ближайшую,
+   * а если рядом зоны нет — рядом с дорогой создаётся зона и остановка для неё.
+   */
   function addStopPoint(wayId: number, position: LatLon): void {
-    const id = mutate('Новый пункт остановки', (d, p) => {
-      const node = insertNodeOnWay(d, p, wayId, position)
+    const hierarchy = stopHierarchy.value
+    const p = projector.value
+    const hasArea = !!hierarchy && !!p && nearAreas(hierarchy, p, position, AREA_REACH_M).length > 0
+    const nearStop = hierarchy && p ? nearStops(hierarchy, p, position, STOP_JOIN_RADIUS_M)[0]?.stop : undefined
+    const id = mutate('Новый пункт остановки', (d, pr) => {
+      const node = insertNodeOnWay(d, pr, wayId, position)
       setNodeTags(d, node, { ...(d.node(node).tags ?? {}), public_transport: 'stop_position', bus: 'yes' })
+      if (!hasArea) {
+        const area = addNode(d, sideOfRoad(d, pr, wayId, d.node(node), AREA_SIDE_OFFSET_M), { public_transport: 'platform', bus: 'yes' })
+        setNodeTags(d, node, withStopArea(d.node(node).tags, areaKey('node', area)))
+        if (nearStop) moveAreaToStop(d, 'node', area, nearStop.id)
+        else {
+          d.putRelation({
+            id: d.newId(),
+            members: [['node', area, 'platform'], ['node', node, 'stop']],
+            tags: { type: 'public_transport', public_transport: 'stop_area', name: `Остановка ${node}` },
+          })
+        }
+      }
       return node
     })
-    if (id !== undefined) selectOne({ kind: 'node', id })
-  }
-
-  function addStopArea(position: LatLon): void {
-    const id = mutate('Новая зона остановки', (d) => addNode(d, position, { public_transport: 'platform', bus: 'yes' }))
-    if (id !== undefined) selectOne({ kind: 'node', id })
-  }
-
-  /** Остановка объединяет выбранный пункт или зону и всё, что стоит рядом. */
-  function addStopFromNode(nodeId: number): void {
-    const d = doc.value
-    const p = projector.value
-    const base = d?.nodes.get(nodeId)
-    if (!d || !p || !base) return
-    const origin = p.toXY(base)
-    const members: number[] = []
-    for (const node of d.nodes.values()) {
-      if (!matchesNode('stopPoints', node, d) && !matchesNode('stopAreas', node, d)) continue
-      const point = p.toXY(node)
-      if (Math.hypot(point.x - origin.x, point.y - origin.y) <= STOP_GROUP_RADIUS_M) members.push(node.id)
+    if (id !== undefined) {
+      selectOne({ kind: 'node', id })
+      if (!hasArea) toast(nearStop ? `Создана зона в остановке «${nearStop.name}»` : 'Рядом не было зоны: созданы зона и остановка')
     }
-    mutate('Новая остановка', (target) => {
-      target.putRelation({
-        id: target.newId(),
-        members: members.map((id) => ['node', id, target.node(id).tags?.public_transport === 'platform' ? 'platform' : 'stop']),
-        tags: { type: 'public_transport', public_transport: 'stop_area', name: base.tags?.name ?? `Остановка ${nodeId}` },
-      })
+  }
+
+  /** Новая зона входит в ближайшую остановку, если она рядом. */
+  function addStopArea(position: LatLon): void {
+    const hierarchy = stopHierarchy.value
+    const p = projector.value
+    const nearStop = hierarchy && p ? nearStops(hierarchy, p, position, STOP_JOIN_RADIUS_M)[0]?.stop : undefined
+    const id = mutate('Новая зона остановки', (d) => {
+      const area = addNode(d, position, { public_transport: 'platform', bus: 'yes' })
+      if (nearStop) moveAreaToStop(d, 'node', area, nearStop.id)
+      return area
     })
-    toast(`Остановка создана, объектов в ней: ${members.length}`, 'success')
+    if (id !== undefined) {
+      selectOne({ kind: 'node', id })
+      toast(nearStop ? `Зона вошла в остановку «${nearStop.name}»` : 'Зона создана. Остановку для неё можно создать в карточке зоны')
+    }
+  }
+
+  /** Остановка создаётся из зоны. Щелчок по пункту берёт его зону. */
+  function addStopFromNode(nodeId: number): void {
+    const hierarchy = stopHierarchy.value
+    const base = doc.value?.nodes.get(nodeId)
+    if (!hierarchy || !base) return
+    const key = hierarchy.areas.has(areaKey('node', nodeId)) ? areaKey('node', nodeId) : (hierarchy.points.get(nodeId)?.area ?? null)
+    if (!key) {
+      toast('Пункт не входит ни в одну зону: сначала поставьте зону рядом с ним', 'error')
+      return
+    }
+    const area = hierarchy.areas.get(key)!
+    if (area.stop !== null) {
+      selectStop(area.stop)
+      toast(`Зона уже входит в остановку «${hierarchy.stops.get(area.stop)?.name ?? area.stop}»`)
+      return
+    }
+    createStopFromArea(key, base.tags?.name ?? area.name)
+    toast('Остановка создана', 'success')
   }
 
   function focusOn(position: LatLon, zoomLevel?: number): void {
@@ -1479,6 +1576,16 @@ export const useEditor = defineStore('editor', () => {
     selectedLineId,
     selectedLine,
     transitLoadShown,
+    stopHierarchy,
+    selectedStopId,
+    selectedStop,
+    selectStop,
+    focusStop,
+    setPointArea,
+    setAreaStop,
+    createStopFromArea,
+    renameStop,
+    deleteStop,
     lines,
     cursor,
     filterRules,

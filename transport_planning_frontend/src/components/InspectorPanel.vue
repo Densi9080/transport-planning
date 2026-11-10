@@ -4,6 +4,8 @@ import { computed } from 'vue'
 
 import { customObjectOf } from '@/core/netObjects'
 import StopAreaInspector from './StopAreaInspector.vue'
+import StopInspector from './StopInspector.vue'
+import StopPointInspector from './StopPointInspector.vue'
 import { useAssistant } from '@/stores/assistant'
 import { useEditor } from '@/stores/editor'
 
@@ -43,11 +45,17 @@ const isMulti = computed(() => ways.value.length + nodes.value.length > 1)
     <SimPanel v-if="editor.viewMode === 'sim'" />
     <RoadPresets v-else-if="editor.tool === 'road'" />
     <TurnInspector v-else-if="editor.selectedTurn" :key="`turn${editor.selectedTurn.node}-${editor.selectedTurn.from}`" />
+    <StopInspector v-else-if="editor.selectedStop && ways.length + nodes.length === 0" :key="`stop${editor.selectedStop.id}`" />
+    <StopAreaInspector v-else-if="isSingleWay && ways[0]!.tags?.public_transport === 'platform'" :key="`areaw${ways[0]!.id}`" kind="way" :id="ways[0]!.id" />
     <template v-else-if="isSingleWay">
       <LaneSection :way="ways[0]!" />
       <WayInspector :key="ways[0]!.id" :way="ways[0]!" />
     </template>
-    <StopAreaInspector v-else-if="isSingleNode && nodes[0]!.tags?.public_transport === 'platform'" :key="`area${nodes[0]!.id}`" :node="nodes[0]!" />
+    <StopAreaInspector v-else-if="isSingleNode && nodes[0]!.tags?.public_transport === 'platform'" :key="`area${nodes[0]!.id}`" kind="node" :id="nodes[0]!.id" />
+    <template v-else-if="isSingleNode && editor.stopHierarchy?.points.has(nodes[0]!.id)">
+      <StopPointInspector :key="`point${nodes[0]!.id}`" :node="nodes[0]!" />
+      <NodeInspector :key="nodes[0]!.id" :node="nodes[0]!" />
+    </template>
     <NetObjectInspector v-else-if="isSingleNode && customObjectOf(nodes[0]!.tags)" :key="`object${nodes[0]!.id}`" :node="nodes[0]!" />
     <NodeInspector v-else-if="isSingleNode" :key="nodes[0]!.id" :node="nodes[0]!" />
     <div v-else-if="isMulti" class="section">

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { OsmDoc } from '../doc'
 import { Projector } from '../geo'
 import { readLine } from '../transit'
-import { computeRoute, groupLines, oppositeRoute, stopPointOfArea, writeProfileValue } from '../transitCalc'
+import { computeRoute, groupLines, oppositeRoute, writeProfileValue } from '../transitCalc'
 import type { RawDocument } from '../types'
 
 const STEP = 0.009
@@ -62,12 +62,5 @@ describe('показатели маршрута', () => {
     const { line, back } = setup()
     expect(groupLines([line, back])).toHaveLength(1)
     expect(oppositeRoute(line, [line, back])?.id).toBe(101)
-  })
-
-  it('зона остановки привязывается к ближайшему пункту или к заданному', () => {
-    const { doc, projector } = setup()
-    expect(stopPointOfArea(doc, projector, doc.node(9))).toMatchObject({ node: { id: 2 }, explicit: false })
-    const bound = { ...doc.node(9), tags: { ...doc.node(9).tags, 'tp:stop_point': '3' } }
-    expect(stopPointOfArea(doc, projector, bound)).toMatchObject({ node: { id: 3 }, explicit: true })
   })
 })
