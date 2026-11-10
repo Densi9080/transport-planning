@@ -609,6 +609,15 @@ export function junctionConnectors(
   }
   // Стык двух дорог — это продолжение одной дороги, а не поворот
   const continuation = arms.length === 2
+  const manual = new Set<Connector>()
+  // Направления берутся там, где полоса обрезана, а не у центра узла: дорога может изгибаться
+  const buildPoints = (c: Connector): XY[] => {
+    const fromGeometry = geometries.get(c.from)!
+    const toGeometry = geometries.get(c.to)!
+    const start = lanePoint(fromGeometry, c.fromLane, true)
+    const end = lanePoint(toGeometry, c.toLane, false)
+    return shapedCurve(turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir), shapeOf(c.from, c.to))
+  }
 
   for (const from of arms) {
     if (from.lanesIn === 0) continue
@@ -640,18 +649,10 @@ export function junctionConnectors(
           }
         }
         pairs.forEach(([lane, toLane]) => {
-          const start = lanePoint(fromGeometry, lane, true)
-          const end = lanePoint(toGeometry, toLane, false)
-          found.push({
-            node,
-            from,
-            to,
-            fromLane: lane,
-            toLane,
-            kind,
-            // Направления берутся там, где полоса обрезана, а не у центра узла: дорога может изгибаться
-            points: shapedCurve(turnCurve(start, scale(fromGeometry.dir, -1), end, toGeometry.dir), shapeOf(from, to)),
-          })
+          const connector: Connector = { node, from, to, fromLane: lane, toLane, kind, points: [] }
+          connector.points = buildPoints(connector)
+          if (rule) manual.add(connector)
+          found.push(connector)
         })
       }
       return found
@@ -661,7 +662,63 @@ export function junctionConnectors(
     const tagged = collect(false)
     connectors.push(...(tagged.length > 0 ? tagged : collect(true)))
   }
+
+  untangle(connectors, arms, geometries, manual, buildPoints)
   return connectors
+}
+
+/**
+ * Распутывание траекторий узла по их физическому положению.
+ *
+ * В выезд траектории входят в том порядке, в каком подходят к нему: та, что подходит левее, занимает левую
+ * полосу. Так при слиянии двух дорог левая не уходит в правые полосы, а правая — в левые.
+ * С подхода траектории расходятся в том порядке, куда ведут: та, что уходит левее, начинается с левой полосы.
+ * Число траекторий на каждую полосу сохраняется. Ручные соединения из редактора узла не трогаются,
+ * а полосы подходов со стрелками разметки не переставляются: разметка важнее геометрии.
+ */
+function untangle(
+  connectors: Connector[],
+  arms: Arm[],
+  geometries: Map<Arm, ArmGeometry>,
+  manual: Set<Connector>,
+  build: (connector: Connector) => XY[],
+): void {
+  const reorder = (group: Connector[], position: (c: Connector) => number, read: (c: Connector) => number, write: (c: Connector, lane: number) => void) => {
+    if (group.length < 2) return
+    const lanes = group.map(read).sort((a, b) => a - b)
+    const sorted = [...group].sort((a, b) => position(b) - position(a) || read(a) - read(b))
+    let changed = false
+    sorted.forEach((connector, index) => {
+      if (read(connector) !== lanes[index]) changed = true
+      write(connector, lanes[index]!)
+    })
+    if (changed) for (const connector of group) connector.points = build(connector)
+  }
+
+  for (const to of arms) {
+    const geometry = geometries.get(to)
+    if (!geometry) continue
+    // Положение начала траектории поперёк выезда: больше — левее по ходу движения в выезде
+    reorder(
+      connectors.filter((c) => c.to === to && !manual.has(c)),
+      (c) => cross(geometry.dir, sub(c.points[0]!, geometry.center)),
+      (c) => c.toLane,
+      (c, lane) => (c.toLane = lane),
+    )
+  }
+  for (const from of arms) {
+    const geometry = geometries.get(from)
+    const turns = armTurns(from, true)
+    if (!geometry || (turns && turns.some((turn) => turn && turn !== 'none'))) continue
+    const travelIn = scale(geometry.dir, -1)
+    // Положение конца траектории поперёк подхода: больше — левее по ходу движения на подходе
+    reorder(
+      connectors.filter((c) => c.from === from && !manual.has(c)),
+      (c) => cross(travelIn, sub(c.points.at(-1)!, geometry.center)),
+      (c) => c.fromLane,
+      (c, lane) => (c.fromLane = lane),
+    )
+  }
 }
 
 /**
