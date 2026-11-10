@@ -1,0 +1,22 @@
+services:
+  editor:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Для доступа не только с этого компьютера задайте свой ключ
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-docker-key-change-me}
+      # Помощник. Можно задать здесь или в окне настроек редактора
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # 1 запрещает менять подключение из браузера: нужно, если редактором пользуются другие люди
+      LLM_SETTINGS_LOCKED: ${LLM_SETTINGS_LOCKED:-0}
+    # Внутри контейнера модель на этом же компьютере доступна по адресу host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - editor-data:/data
+
+volumes:
+  editor-data:
