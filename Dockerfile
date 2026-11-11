@@ -13,7 +13,8 @@ ENV PYTHONUNBUFFERED=1 \
     DJANGO_DEBUG=0 \
     DJANGO_ALLOWED_HOSTS=* \
     DJANGO_DATA_DIR=/data \
-    DJANGO_FRONTEND_DIST=/app/frontend_dist
+    DJANGO_FRONTEND_DIST=/app/frontend_dist \
+    SUMO_HOME=/usr/local/lib/python3.12/site-packages/sumo
 
 # SUMO нужен только кнопке предпроверки и занимает сотни мегабайт:
 # без него образ собирается быстрее, docker compose build --build-arg WITH_SUMO=0
@@ -32,6 +33,7 @@ RUN pip install --no-cache-dir -r req.txt gunicorn==23.0.0 \
         && SUMO_BIN="$(python -c 'import sumo, os; print(os.path.join(sumo.SUMO_HOME, "bin"))')" \
         && missing="$(ldd "$SUMO_BIN/netconvert" "$SUMO_BIN/sumo" | grep 'not found' || true)" \
         && if [ -n "$missing" ]; then echo "SUMO: не хватает библиотек:"; echo "$missing"; exit 1; fi \
+        && if [ ! -f "$SUMO_HOME/data/typemap/osmNetconvert.typ.xml" ]; then echo "SUMO_HOME указывает не туда: $SUMO_HOME"; exit 1; fi \
         && "$SUMO_BIN/netconvert" --version | head -1; \
     fi
 COPY transport_planning/ ./

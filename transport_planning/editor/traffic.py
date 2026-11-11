@@ -35,10 +35,23 @@ class TrafficError(RuntimeError):
     """SUMO не смог выполнить расчёт."""
 
 
+def _is_sumo_home(path: Path) -> bool:
+    return (path / 'data' / 'typemap' / 'osmNetconvert.typ.xml').exists()
+
+
 def _sumo_home(netconvert: str) -> Path:
+    """Папка SUMO с data/typemap. Без неё netconvert не находит типы дорог и не загружает ни одного узла."""
     home = os.environ.get('SUMO_HOME')
-    if home:
+    if home and _is_sumo_home(Path(home)):
         return Path(home)
+    try:
+        import sumo  # пакет eclipse-sumo знает, где лежит
+
+        if _is_sumo_home(Path(sumo.SUMO_HOME)):
+            return Path(sumo.SUMO_HOME)
+    except ImportError:
+        pass
+    # netconvert из pip часто лежит обёрткой в /usr/local/bin, поэтому родитель родителя — не SUMO_HOME
     return Path(netconvert).resolve().parent.parent
 
 
@@ -234,7 +247,7 @@ def run_traffic(osm_bytes: bytes, trips: int = 1000, period: int = 3600, seed: i
     period = max(MIN_PERIOD, min(MAX_PERIOD, int(period)))
 
     home = _sumo_home(netconvert)
-    bin_dir = Path(netconvert).parent
+    bin_dir = home / 'bin' if (home / 'bin').is_dir() else Path(netconvert).parent
     sumo = str(bin_dir / ('sumo.exe' if os.name == 'nt' else 'sumo'))
     duarouter = str(bin_dir / ('duarouter.exe' if os.name == 'nt' else 'duarouter'))
 
